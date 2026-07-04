@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <meta name="theme-color" content="#e84a8a">
+  <title>Theo dõi chu kỳ</title>
+  <?!= include('StyleSheet'); ?>
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <div class="brand">
+        <span class="logo">🌸</span>
+        <div>
+          <h1>Theo dõi chu kỳ</h1>
+          <p class="subtitle">Dự đoán rụng trứng & cửa sổ thụ thai</p>
+        </div>
+      </div>
+      <button class="btn-icon" id="btn-refresh" title="Làm mới">↻</button>
+    </header>
+
+    <!-- TAB BAR (mobile) -->
+    <nav class="tabbar" role="tablist">
+      <button class="tab active" data-tab="forecast" role="tab">Dự báo</button>
+      <button class="tab" data-tab="form" role="tab">Nhập mới</button>
+      <button class="tab" data-tab="history" role="tab">Lịch sử</button>
+    </nav>
+
+    <main class="content">
+      <!-- ============ FORECAST ============ -->
+      <section class="panel" id="panel-forecast" data-panel="forecast">
+        <div class="mode-switch" id="mode-switch" role="group" aria-label="Chế độ theo dõi">
+          <button class="mode-btn active" type="button" data-mode="track">Theo dõi</button>
+          <button class="mode-btn" type="button" data-mode="ttc">Thụ thai</button>
+        </div>
+
+        <div id="forecast-empty" class="empty hidden">
+          <p>Chưa có dữ liệu. Hãy thêm kỳ kinh đầu tiên ở tab <b>Nhập mới</b>.</p>
+        </div>
+
+        <div id="forecast-body" class="hidden">
+          <div class="card mode-card" id="mode-card">
+            <div class="card-label" id="mode-card-label">Trạng thái hôm nay</div>
+            <div class="mode-main" id="mode-main">—</div>
+            <div class="mode-support" id="mode-support">—</div>
+            <div class="mode-chips">
+              <span id="mode-chip-a">—</span>
+              <span id="mode-chip-b">—</span>
+            </div>
+          </div>
+
+          <!-- Cảnh báo chu kỳ không đều -->
+          <div id="irregular-warning" class="warning-banner hidden">
+            <div class="warning-icon">⚠️</div>
+            <div class="warning-body">
+              <strong>Chu kỳ không đều</strong>
+              <p>Chênh lệch giữa chu kỳ ngắn nhất và dài nhất là <b id="warn-spread">—</b> ngày.
+                 Dự đoán theo công thức toán học sẽ có sai số lớn.</p>
+              <p class="warning-tip">💡 Khuyến nghị: dùng <b>que thử rụng trứng (LH)</b> để xác định chính xác,
+                 và tham khảo <b>bác sĩ sản phụ khoa</b> nếu tình trạng kéo dài
+                 (có thể liên quan đến PCOS, tuyến giáp, stress, v.v.).</p>
+            </div>
+          </div>
+
+          <!-- KỲ KINH TIẾP THEO - 3 mốc -->
+          <div class="card card-next">
+            <div class="card-label">Kỳ kinh dự đoán tiếp theo</div>
+            <div class="range-row">
+              <div class="range-item">
+                <span class="range-tag">Sớm nhất</span>
+                <span class="range-date" id="f-next-min">—</span>
+              </div>
+              <div class="range-item range-likely">
+                <span class="range-tag">Khả năng cao</span>
+                <span class="range-date" id="f-next-likely">—</span>
+                <span class="range-countdown" id="f-next-count"></span>
+              </div>
+              <div class="range-item">
+                <span class="range-tag">Muộn nhất</span>
+                <span class="range-date" id="f-next-max">—</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- RỤNG TRỨNG - 3 mốc -->
+          <div class="card card-ovulation">
+            <div class="card-label">Ngày rụng trứng dự đoán</div>
+            <div class="range-row">
+              <div class="range-item">
+                <span class="range-tag">Sớm nhất</span>
+                <span class="range-date" id="f-ov-min">—</span>
+              </div>
+              <div class="range-item range-likely">
+                <span class="range-tag">Khả năng cao</span>
+                <span class="range-date" id="f-ov-likely">—</span>
+                <span class="range-countdown" id="f-ov-count"></span>
+              </div>
+              <div class="range-item">
+                <span class="range-tag">Muộn nhất</span>
+                <span class="range-date" id="f-ov-max">—</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- CỬA SỔ THỤ THAI -->
+          <div class="card card-fertile">
+            <div class="card-label">Cửa sổ thụ thai</div>
+            <div class="fertile-display">
+              <div class="fertile-likely">
+                <span class="fertile-likely-tag">Khả năng cao</span>
+                <span id="f-fertile-likely">—</span>
+              </div>
+              <div class="fertile-full">
+                <span class="fertile-full-tag">Toàn dải dự đoán</span>
+                <span id="f-fertile-full">—</span>
+              </div>
+              <div class="fertile-peak">
+                <span class="fertile-peak-tag">Cao điểm</span>
+                <span id="f-fertile-peak">—</span>
+              </div>
+              <div class="fertile-status" id="f-fertile-count"></div>
+            </div>
+          </div>
+
+          <!-- THÔNG TIN CHU KỲ -->
+          <div class="card card-info">
+            <div class="card-label">Thống kê chu kỳ</div>
+            <div class="confidence-pill" id="f-confidence">Độ tin cậy: —</div>
+            <div class="cycle-stats">
+              <div class="stat"><span class="stat-num" id="f-cycle-min">—</span><span class="stat-lbl">Min</span></div>
+              <div class="stat stat-highlight"><span class="stat-num" id="f-cycle-median">—</span><span class="stat-lbl">Median</span></div>
+              <div class="stat"><span class="stat-num" id="f-cycle-max">—</span><span class="stat-lbl">Max</span></div>
+            </div>
+            <div class="card-countdown" id="f-sample-note">Dựa trên <b id="f-samples">0</b> chu kỳ đã ghi nhận</div>
+            <div class="smart-note hidden" id="smart-forecast-note"></div>
+          </div>
+
+          <!-- BIỂU ĐỒ CHU KỲ -->
+          <div class="card card-chart">
+            <div class="card-label">Biểu đồ chu kỳ</div>
+            <div class="cycle-chart" id="cycle-chart"></div>
+            <div class="chart-empty hidden" id="cycle-chart-empty">Cần ít nhất 2 kỳ kinh để có biểu đồ chu kỳ.</div>
+          </div>
+        </div>
+
+        <div class="legend">
+          <div><span class="dot dot-period"></span>Hành kinh thực tế</div>
+          <div><span class="dot dot-period-pred"></span>Kỳ kinh dự đoán</div>
+          <div><span class="dot dot-ov"></span>Rụng trứng</div>
+          <div><span class="dot dot-fertile"></span>Cửa sổ thụ thai</div>
+        </div>
+
+        <!-- Mini calendar -->
+        <div id="mini-cal" class="mini-cal hidden">
+          <div class="mini-cal-header">
+            <button class="btn-icon" id="cal-prev">‹</button>
+            <div id="cal-title">—</div>
+            <button class="btn-icon" id="cal-next">›</button>
+          </div>
+          <div class="mini-cal-grid" id="cal-grid"></div>
+        </div>
+      </section>
+
+      <!-- ============ FORM ============ -->
+      <section class="panel hidden" id="panel-form" data-panel="form">
+        <h2>Thêm kỳ kinh mới</h2>
+        <form id="entry-form" autocomplete="off">
+          <label class="field">
+            <span>Ngày bắt đầu hành kinh <em>*</em></span>
+            <input type="date" name="start" required>
+          </label>
+
+          <label class="field">
+            <span>Ngày kết thúc hành kinh</span>
+            <input type="date" name="end">
+          </label>
+
+          <label class="field">
+            <span>Ghi chú</span>
+            <textarea name="notes" rows="2" placeholder="Tâm trạng, triệu chứng…"></textarea>
+            <small>💡 Chu kỳ sẽ được tự động tính từ khoảng cách giữa các lần hành kinh — không cần nhập tay.</small>
+          </label>
+
+          <div class="actions">
+            <button type="submit" class="btn btn-primary" id="btn-save">Lưu</button>
+            <button type="reset" class="btn">Xoá form</button>
+          </div>
+        </form>
+
+        <div id="form-msg" class="msg hidden"></div>
+      </section>
+
+      <!-- ============ HISTORY ============ -->
+      <section class="panel hidden" id="panel-history" data-panel="history">
+        <h2>Lịch sử các kỳ kinh</h2>
+        <div id="history-empty" class="empty hidden">
+          <p>Chưa có dữ liệu nào.</p>
+        </div>
+        <div class="history-list" id="history-list"></div>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <small>Công cụ ước lượng dựa trên mô hình toán học chuẩn. Không thay thế tư vấn y khoa.</small>
+    </footer>
+
+    <!-- LOADING OVERLAY -->
+    <div class="overlay hidden" id="overlay">
+      <div class="spinner"></div>
+    </div>
+  </div>
+
+  <?!= include('JavaScript'); ?>
+</body>
+</html>

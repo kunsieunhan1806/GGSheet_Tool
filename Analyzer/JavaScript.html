@@ -1,0 +1,1087 @@
+<script>
+(function () {
+  'use strict';
+
+  /* ===== SHARED STATE ===== */
+  let state      = { ticketType: '6/45', label: 'Mega 6/45', max: 45, hasSpecial: false,
+                     main: 6, pick: 6, results: [], stats: null };
+  let cmpData    = { rows: [], methodStats: {} };
+  let finData    = { totalCost: 0, totalPrize: 0, net: 0, sessions: [], pending: [], byType: {}, byMethod: {} };
+  let ticketType = '6/45';
+  let method     = 'balanced';
+  let statsWindow = '50';
+  let lastResult = null;
+
+  /* ===== UTIL ===== */
+  const $  = sel => document.querySelector(sel);
+  const $$ = sel => document.querySelectorAll(sel);
+
+  function showOverlay(show) { $('#overlay').classList.toggle('hidden', !show); }
+
+  function handleFailure(err) {
+    showOverlay(false);
+    const text = '❌ ' + (err && err.message ? err.message : String(err));
+    const msg = $('#form-msg');
+    if (msg && !$('#panel-form').classList.contains('hidden')) {
+      msg.textContent = text; msg.className = 'msg error'; msg.classList.remove('hidden');
+    } else { alert(text); }
+  }
+
+  function applyData(data, onSuccess) {
+    try {
+      state = data;
+      render();
+      if (onSuccess) onSuccess();
+    } catch (err) {
+      console.error('Render error:', err);
+      alert('Lỗi hiển thị: ' + (err && err.message ? err.message : err));
+    } finally { showOverlay(false); }
+  }
+
+  function parseDate(iso) {
+    if (!iso) return null;
+    const m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})/);
+    return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
+  }
+
+  function fmtVN(iso) {
+    const d = parseDate(iso);
+    if (!d) return '—';
+    return String(d.getDate()).padStart(2,'0') + '/'
+         + String(d.getMonth()+1).padStart(2,'0') + '/' + d.getFullYear();
+  }
+
+  function todayIso() {
+    const t = new Date();
+    return t.getFullYear() + '-'
+      + String(t.getMonth()+1).padStart(2,'0') + '-'
+      + String(t.getDate()).padStart(2,'0');
+  }
+
+  function pad2(n) { return String(n).padStart(2, '0'); }
+  function is655() { return ticketType === '6/55'; }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"]/g, c =>
+      ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+  }
+
+  function ball(n, small, special, matched) {
+    const b = document.createElement('div');
+    let cls = '';
+    if      (matched)  cls = 'ball-matched';
+    else if (special)  cls = 'ball-special';
+    else if (is655())  cls = 'ball-655';
+    b.className = 'ball' + (small ? ' ball-sm' : '') + (cls ? ' ' + cls : '');
+    b.textContent = pad2(n);
+    if (special) b.title = 'Số đặc biệt';
+    if (matched) b.title = 'Trùng với kết quả thực!';
+    return b;
+  }
+
+  function signed(n, digits) {
+    n = Number(n) || 0;
+    digits = digits === undefined ? 2 : digits;
+    return (n > 0 ? '+' : '') + n.toFixed(digits);
+  }
+
+  function currentStats() {
+    const windows = state.statsByWindow || {};
+    return windows[statsWindow] || windows.all || state.stats;
+  }
+
+  function signalClass(it) {
+    if (!it || !it.significant) return 'z-neutral';
+    return it.signal === 'hot' ? 'z-hot' : (it.signal === 'cold' ? 'z-cold' : 'z-neutral');
+  }
+
+  function signalMarker(it) {
+    if (!it || !it.significant) return '';
+    return it.signal === 'hot' ? '🔥 ' : (it.signal === 'cold' ? '❄️ ' : '');
+  }
+
+  function statBall(it, small) {
+    const b = document.createElement('div');
+    b.className = 'stat-ball ' + (small ? ' ball-sm' : '') + ' ' + signalClass(it);
+    b.textContent = pad2(it.n);
+    b.title = 'Số ' + pad2(it.n) + ' - z=' + signed(it.zScore)
+      + ', ra ' + it.freq + ' lần; kỳ vọng ' + it.expected;
+    return b;
+  }
+
+  function chooseStatsWindow() {
+    const windows = state.statsByWindow || {};
+    if (windows[statsWindow]) return statsWindow;
+    if (windows['50']) return '50';
+    if (windows.all) return 'all';
+    return statsWindow;
+  }
+
+  function comb(n, k) {
+    if (k < 0 || k > n) return 0;
+    k = Math.min(k, n - k);
+    let out = 1;
+    for (let i = 1; i <= k; i++) out = out * (n - k + i) / i;
+    return out;
+  }
+
+  function exactMatchProb(max, pick, main, hit) {
+    return comb(main, hit) * comb(max - main, pick - hit) / comb(max, pick);
+  }
+
+  function fmtOdds(prob) {
+    if (!prob) return '—';
+    const odds = 1 / prob;
+    const opts = odds < 100
+      ? { minimumFractionDigits: 1, maximumFractionDigits: 1 }
+      : { maximumFractionDigits: 0 };
+    return '1/' + odds.toLocaleString('vi-VN', opts);
+  }
+
+  function randomMatchBaseline() {
+    return ((state.pick || 6) * (state.main || 6)) / (state.max || 45);
+  }
+
+  /* ===== TABS ===== */
+  // generate + form nằm trong wrapper #desktop-two-col
+  const WRAP_TABS = ['generate', 'form'];
+
+  function applyTab(target) {
+    $$('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === target));
+    const wrapper = $('#desktop-two-col');
+    // Chỉ hiện wrapper khi tab thuộc nhóm generate/form
+    if (wrapper) wrapper.classList.toggle('hidden', !WRAP_TABS.includes(target));
+    // Mỗi tab chỉ hiện đúng panel của nó — KHÔNG hiện cả 2 cùng lúc trên desktop
+    $$('.panel').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== target));
+  }
+
+  $$('.tab').forEach(btn => btn.addEventListener('click', () => applyTab(btn.dataset.tab)));
+  function switchTab(target) { applyTab(target); }
+
+  /* ===== TYPE SWITCH ===== */
+  $$('.type-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.type === ticketType) return;
+      ticketType = btn.dataset.type;
+      $$('.type-btn').forEach(b => b.classList.toggle('active', b === btn));
+      const radio = document.querySelector('input[name=type][value="' + ticketType + '"]');
+      if (radio) radio.checked = true;
+      syncRangeHint();
+      setDrawDateDefault();
+      clearGenerated();
+      historyPage = 1;
+      load();
+    });
+  });
+
+  function syncRangeHint() { applyTypeToForm(ticketType); }
+
+  function applyTypeToForm(type) {
+    const cfg655 = type === '6/55';
+    const max = cfg655 ? 55 : 45;
+
+    const mainLabel = $('#main-nums-label');
+    if (mainLabel) mainLabel.innerHTML = '6 số chính <em>*</em>'
+      + ' <small id="range-hint">(mỗi số từ 1 đến ' + max + ')</small>';
+    else { const h = $('#range-hint'); if (h) h.textContent = '(mỗi số từ 1 đến ' + max + ')'; }
+
+    for (let i = 1; i <= 6; i++) {
+      const inp = document.querySelector('input[name=n' + i + ']');
+      if (inp) { inp.max = max; inp.min = 1; inp.required = true; inp.value = ''; }
+    }
+    const n6w = $('#n6-wrap'), n6 = document.querySelector('input[name=n6]');
+    if (n6w) n6w.style.display = '';
+    if (n6)  { n6.max = max; n6.min = 1; n6.required = true; n6.value = ''; }
+
+    const n7 = document.querySelector('input[name=n7]');
+    if (n7) { n7.max = max; n7.min = 1; n7.required = cfg655; n7.value = ''; n7.placeholder = 'ĐB'; }
+    const spField = $('#special-field');
+    if (spField) spField.classList.toggle('hidden', !cfg655);
+    const spLabel = $('#special-label');
+    if (spLabel) spLabel.innerHTML = '⭐ Số đặc biệt <em>*</em> <small>(01–' + max + ', khác 6 số chính)</small>';
+  }
+
+  /* ===== METHOD SELECT ===== */
+  $$('.method-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      method = btn.dataset.method;
+      $$('.method-btn').forEach(b => b.classList.toggle('active', b === btn));
+    });
+  });
+
+  /* ===== DRAW DATE ===== */
+  // 6/55: T3(2) T5(4) T7(6) | 6/45: CN(0) T4(3) T6(5)
+  const DRAW_DAYS = { '6/55': [2,4,6], '6/45': [0,3,5] };
+
+  function nextDrawDate(type) {
+    const now  = new Date();
+    const days = DRAW_DAYS[type] || DRAW_DAYS['6/45'];
+    const dow  = now.getDay();
+    const hour = now.getHours();
+
+    // Hôm nay có phải ngày quay? và chưa đến 18h?
+    if (days.includes(dow) && hour < 18) {
+      return now.getFullYear() + '-'
+        + String(now.getMonth()+1).padStart(2,'0') + '-'
+        + String(now.getDate()).padStart(2,'0');
+    }
+
+    // Tìm ngày quay kế tiếp (từ ngày mai trở đi)
+    let minDiff = 7;
+    days.forEach(d => {
+      let diff = d - dow;
+      if (diff <= 0) diff += 7;        // ngày đó đã qua trong tuần này → tuần sau
+      if (diff === 0) diff = 7;        // phòng thủ
+      if (minDiff === 7 || diff < minDiff) minDiff = diff;
+    });
+    // Trường hợp hôm nay là ngày quay nhưng đã qua 18h → minDiff tính ra 0 → cộng 7
+    if (minDiff === 0) minDiff = 7;
+
+    const target = new Date(now);
+    target.setDate(now.getDate() + minDiff);
+    return target.getFullYear() + '-'
+      + String(target.getMonth()+1).padStart(2,'0') + '-'
+      + String(target.getDate()).padStart(2,'0');
+  }
+
+  function setDrawDateDefault() {
+    const inp = $('#draw-date-input');
+    if (inp) inp.value = nextDrawDate(ticketType);
+  }
+
+  /* ===== DATA LOADING ===== */
+  function load() {
+    showOverlay(true);
+    google.script.run
+      .withSuccessHandler(data => { applyData(data); loadComparison(); loadFinance(); })
+      .withFailureHandler(handleFailure)
+      .getData(ticketType);
+  }
+
+  function loadComparison() {
+    google.script.run
+      .withSuccessHandler(data => { cmpData = data; renderComparison(); })
+      .withFailureHandler(err => console.warn('Comparison load failed:', err))
+      .getComparisonData(ticketType);
+  }
+
+  function loadFinance() {
+    google.script.run
+      .withSuccessHandler(data => { finData = data; renderFinance(); })
+      .withFailureHandler(err => console.warn('Finance load failed:', err))
+      .getFinanceData();
+  }
+
+  const statsWindowSelect = $('#stats-window');
+  if (statsWindowSelect) {
+    statsWindowSelect.addEventListener('change', () => {
+      statsWindow = statsWindowSelect.value;
+      renderStats();
+    });
+  }
+
+  /* ===== TOP-LEVEL RENDER ===== */
+  function render() {
+    $('#gen-type-label').textContent   = state.label;
+    $('#stats-type-label').textContent = state.label;
+    renderStats();
+    renderHistory();
+  }
+
+/* ===== GENERATE ===== */
+  function clearGenerated() {
+    lastResult = null;
+    $('#gen-sets').innerHTML = '';
+    $('#gen-meta').classList.add('hidden');
+    $('#gen-actions').classList.add('hidden');
+  }
+
+  function readSetCount() {
+    let n = parseInt($('#set-count').value, 10);
+    if (isNaN(n) || n < 1) n = 4;
+    if (n > 50) n = 50;
+    $('#set-count').value = n;
+    return n;
+  }
+
+  $('#btn-generate').addEventListener('click', () => {
+    const count = readSetCount();
+    showOverlay(true);
+    google.script.run
+      .withSuccessHandler(res => { showOverlay(false); renderGenerated(res); })
+      .withFailureHandler(handleFailure)
+      .generateNumbers(ticketType, method, count);
+  });
+
+  function renderGenerated(res) {
+    lastResult = res;
+    const methodNames = { hot:'🔥 Số nóng', cold:'❄️ Số nguội', balanced:'⚖️ Cân bằng', random:'🎲 Ngẫu nhiên' };
+    const meta = $('#gen-meta');
+    meta.classList.remove('hidden');
+    meta.innerHTML = 'Phương pháp: <b>' + (methodNames[res.method] || res.method)
+      + '</b> · <b>' + res.sets.length + '</b> bộ · dựa trên <b>' + res.totalDraws + '</b> kỳ quay đã nhập'
+      + (res.totalDraws === 0 ? ' (chưa có dữ liệu → bốc ngẫu nhiên)' : '');
+    $('#gen-actions').classList.toggle('hidden', !res.sets.length);
+    resetCopyUI();
+
+    const wrap = $('#gen-sets');
+    wrap.innerHTML = '';
+    res.sets.forEach((set, i) => {
+      const row = document.createElement('div');
+      row.className = 'gen-set';
+
+      const tag = document.createElement('div');
+      tag.className = 'gen-set-tag';
+      tag.textContent = 'Bộ ' + (i + 1);
+      row.appendChild(tag);
+
+      const balls = document.createElement('div');
+      balls.className = 'gen-balls';
+      set.forEach(n => balls.appendChild(ball(n, false)));
+      row.appendChild(balls);
+
+      const pickN = res.pick || 6;
+      const sum = set.reduce((s, n) => s + n, 0);
+      const evens = set.filter(n => n % 2 === 0).length;
+      const m = document.createElement('div');
+      m.className = 'gen-set-meta';
+      m.innerHTML = 'Tổng ' + sum + '<br>' + evens + ' chẵn · ' + (pickN - evens) + ' lẻ';
+      row.appendChild(m);
+      wrap.appendChild(row);
+    });
+  }
+
+  /* ===== COPY & SAVE ===== */
+  function buildCopyText(res) {
+    const code = res.ticketType === '6/55' ? '655' : '645';
+    let line = 'MOMO ' + code + ' K1';
+    res.sets.forEach((set) => {
+      line += ' S';
+      set.forEach(n => line += ' ' + pad2(n));
+    });
+    return line;
+  }
+
+  function resetCopyUI() {
+    $('#btn-copy-label').textContent = 'Copy & Lưu bộ số (MoMo)';
+    $('#btn-copy').classList.remove('copied');
+    $('#copy-fallback').classList.remove('shown');
+    const ss = $('#save-status');
+    ss.className = 'save-status hidden'; ss.textContent = '';
+  }
+
+  function flashCopied(ok) {
+    const lbl = $('#btn-copy-label'), btn = $('#btn-copy');
+    if (ok) { lbl.textContent = '✅ Đã copy!'; btn.classList.add('copied'); setTimeout(resetCopyUI, 2500); }
+    else    { lbl.textContent = '⚠ Hãy chọn & Ctrl+C ở khung dưới'; btn.classList.add('copied'); }
+  }
+
+  function showSaveStatus(ok, msg) {
+    const el = $('#save-status');
+    el.className = 'save-status ' + (ok ? 'ok' : 'err');
+    el.textContent = msg; el.classList.remove('hidden');
+    if (ok) setTimeout(() => el.classList.add('hidden'), 4000);
+  }
+
+  async function copyToClipboard(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      try { await navigator.clipboard.writeText(text); return true; } catch (_) {}
+    }
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.cssText = 'position:fixed;top:-9999px;opacity:0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (_) {}
+    document.body.removeChild(ta);
+    return ok;
+  }
+
+  $('#btn-copy').addEventListener('click', async () => {
+    if (!lastResult || !lastResult.sets.length) return;
+    const text = buildCopyText(lastResult);
+    const copied = await copyToClipboard(text);
+    flashCopied(copied);
+    const fb = $('#copy-fallback');
+    fb.value = text; if (!copied) fb.classList.add('shown');
+
+    const drawDate = $('#draw-date-input').value || todayIso();
+    const payload = {
+      ticketType: lastResult.ticketType, method: lastResult.method,
+      sets: lastResult.sets, specials: lastResult.specials || [],
+      drawDate: drawDate, session: ''
+    };
+    google.script.run
+      .withSuccessHandler(data => {
+        cmpData = data; renderComparison(); loadFinance();
+        showSaveStatus(true, '✅ Đã lưu ' + lastResult.sets.length + ' bộ số vào sheet BoDaSoSanh.');
+      })
+      .withFailureHandler(err => showSaveStatus(false, '❌ Lưu thất bại: ' + (err && err.message ? err.message : String(err))))
+      .saveGeneratedSets(payload);
+  });
+
+/* ===== STATS ===== */
+  function renderStats() {
+    statsWindow = chooseStatsWindow();
+    const s = currentStats(), hasData = s && s.totalDraws > 0;
+    if (statsWindowSelect && statsWindowSelect.value !== statsWindow) statsWindowSelect.value = statsWindow;
+    $('#stats-empty').classList.toggle('hidden', hasData);
+    $('#stats-body').classList.toggle('hidden', !hasData);
+    renderStatsWindowNote(s);
+    if (!hasData) return;
+    $('#s-total').textContent = s.totalDraws;
+    $('#s-hot').textContent   = s.hot.length  ? signalMarker(s.hot[0]) + pad2(s.hot[0].n)  : '—';
+    $('#s-cold').textContent  = s.cold.length ? signalMarker(s.cold[0]) + pad2(s.cold[0].n) : '—';
+    renderZNote(s);
+    renderRank('#rank-hot',  s.hot,  it => signalMarker(it) + it.freq + ' lần · z=' + signed(it.zScore));
+    renderRank('#rank-cold', s.cold, it => signalMarker(it) + it.freq + ' lần · z=' + signed(it.zScore));
+    renderHeat(s);
+    renderOdds();
+  }
+
+  function renderStatsWindowNote(s) {
+    const note = $('#stats-window-note');
+    if (!note) return;
+    const total = (state.results || []).length;
+    if (!s || !total) {
+      note.textContent = '';
+      return;
+    }
+    const label = statsWindow === 'all' ? 'toàn bộ lịch sử' : (statsWindow + ' kỳ gần nhất');
+    note.textContent = 'Đang tính ' + s.totalDraws + '/' + total + ' kỳ - ' + label;
+  }
+
+  function renderZNote(s) {
+    const note = $('#stats-z-note');
+    if (!note) return;
+    const hotCount = s.numbers.filter(it => it.signal === 'hot').length;
+    const coldCount = s.numbers.filter(it => it.signal === 'cold').length;
+    note.innerHTML = 'Kỳ vọng mỗi số: <b>' + s.expectedFreq + '</b> lần, sd ≈ <b>' + s.sdFreq
+      + '</b>. Chỉ đánh dấu 🔥/❄️ khi |z| &gt; 2; hiện có <b>' + hotCount
+      + '</b> số cao rõ và <b>' + coldCount + '</b> số thấp rõ.';
+  }
+
+  function renderRank(sel, items, labelFn) {
+    const row = $(sel); row.innerHTML = '';
+    items.forEach(it => {
+      const wrap = document.createElement('div');
+      wrap.className = 'rank-item';
+      wrap.appendChild(statBall(it, false));
+      const small = document.createElement('small');
+      small.textContent = labelFn(it);
+      wrap.appendChild(small); row.appendChild(wrap);
+    });
+  }
+
+  function renderHeat(s) {
+    const grid = $('#heat-grid'); grid.innerHTML = '';
+    s.numbers.forEach(it => {
+      const cell = document.createElement('div');
+      cell.className = 'heat-cell ' + signalClass(it);
+      cell.style.background = heatColor(it.zScore);
+      cell.style.color = Math.abs(Number(it.zScore) || 0) > 2 ? '#fff' : '';
+      cell.innerHTML = '<span>' + pad2(it.n) + '</span><small>z ' + signed(it.zScore, 1) + '</small>';
+      cell.title = 'Số ' + pad2(it.n) + ' - ra ' + it.freq + ' lần (' + it.pct
+        + '%), kỳ vọng ' + it.expected + ', sd ' + it.sd + ', z=' + signed(it.zScore)
+        + '; ' + (it.gap === 0 ? 'vừa ra kỳ gần nhất' : 'khô ' + it.gap + ' kỳ');
+      grid.appendChild(cell);
+    });
+  }
+
+  function heatColor(z) {
+    z = Number(z) || 0;
+    const mag = Math.abs(z);
+    const neutral = [238,237,243];
+    if (mag <= 2) return 'rgb(' + neutral.join(',') + ')';
+    const target = z > 0 ? [214,47,68] : [74,125,255];
+    const ratio = Math.min(1, (mag - 2) / 1.5);
+    return 'rgb(' + neutral.map((v, i) => Math.round(v + (target[i] - v) * ratio)).join(',') + ')';
+  }
+
+  function renderOdds() {
+    const table = $('#odds-table'), evEl = $('#odds-ev');
+    if (!table || !evEl) return;
+    const max = state.max || 45, pick = state.pick || 6, main = state.main || 6;
+    const fixedPrizes = {
+      '6/45': { 3: 30000, 4: 300000, 5: 10000000 },
+      '6/55': { 3: 50000, 4: 500000, 5: 40000000 }
+    }[ticketType] || {};
+    let fixedEv = 0;
+    const rows = [3,4,5,6].map(hit => {
+      const prob = exactMatchProb(max, pick, main, hit);
+      const prize = fixedPrizes[hit] || null;
+      if (prize) fixedEv += prob * prize;
+      return '<tr><td>' + (hit === 6 ? 'Jackpot 6/6' : 'Trùng ' + hit + '/6') + '</td>'
+        + '<td>' + fmtOdds(prob) + '</td>'
+        + '<td>' + (prize ? fmtMoney(prize) : 'Jackpot chia thưởng') + '</td></tr>';
+    }).join('');
+    table.innerHTML = '<thead><tr><th>Mốc</th><th>Xác suất</th><th>Giải</th></tr></thead><tbody>' + rows + '</tbody>';
+    const ticketPrice = 10300;
+    evEl.innerHTML = 'EV phần giải cố định: <b>' + fmtMoney(Math.round(fixedEv))
+      + '</b> / vé ' + fmtMoney(ticketPrice) + ' (≈ ' + (fixedEv / ticketPrice * 100).toFixed(1)
+      + '% giá vé). Jackpot không tính vì phụ thuộc quỹ và số vé cùng trúng.';
+  }
+
+  /* ===== COMPARISON ===== */
+  const METHOD_META = {
+    hot     : { icon:'🔥', label:'Số nóng',    cls:'m-hot' },
+    cold    : { icon:'❄️', label:'Số nguội',   cls:'m-cold' },
+    balanced: { icon:'⚖️', label:'Cân bằng',   cls:'m-balanced' },
+    random  : { icon:'🎲', label:'Ngẫu nhiên', cls:'m-random' }
+  };
+
+  function renderComparison() {
+    const mStats = cmpData.methodStats || {};
+    const rankEl = $('#method-rank-grid'), rankWrap = $('#method-ranking');
+    const baseline = randomMatchBaseline();
+    const baselineEl = $('#compare-baseline');
+    if (baselineEl) {
+      baselineEl.innerHTML = '<b>Baseline ngẫu nhiên</b>: mỗi bộ kỳ vọng trùng '
+        + (state.pick || 6) + '×' + (state.main || 6) + '/' + (state.max || 45)
+        + ' = <b>' + baseline.toFixed(2) + '</b> số. Đây là mốc để đọc “trùng TB mỗi bộ”.';
+    }
+    const hasAnyPlay = Object.values(mStats).some(s => s.plays > 0);
+    rankWrap.classList.toggle('hidden', !hasAnyPlay);
+
+    if (hasAnyPlay) {
+      const sorted = ['hot','cold','balanced','random'].sort((a, b) => {
+        const av = mStats[a] ? (mStats[a].avgPerSet != null ? mStats[a].avgPerSet : mStats[a].avgBestMatch) : null;
+        const bv = mStats[b] ? (mStats[b].avgPerSet != null ? mStats[b].avgPerSet : mStats[b].avgBestMatch) : null;
+        if (av === null && bv === null) return 0;
+        if (av === null) return 1; if (bv === null) return -1;
+        return bv - av;
+      });
+      rankEl.innerHTML = '';
+      sorted.forEach((m, ri) => {
+        const s = mStats[m] || { plays:0, avgBestMatch:null, avgPerSet:null, hitRate:null, dist:{} };
+        const meta = METHOD_META[m] || { icon:'?', label:m };
+        const card = document.createElement('div');
+        card.className = 'method-rank-card rank-' + (ri+1) + (s.plays === 0 ? ' no-data' : '');
+        const emoji = ['🥇','🥈','🥉','4️⃣'][ri] || '';
+        const avgPerSet = s.avgPerSet !== null && s.avgPerSet !== undefined ? s.avgPerSet : null;
+        const delta = avgPerSet !== null ? avgPerSet - baseline : null;
+        card.innerHTML =
+          '<div class="mrc-head"><div class="mrc-name">' + meta.icon + ' ' + meta.label + '</div>'
+          + '<span class="mrc-rank-badge">' + emoji + ' #' + (ri+1) + '</span></div>'
+          + '<div class="mrc-avg">' + (s.avgBestMatch !== null ? s.avgBestMatch.toFixed(2) : '—') + '<small> best/phiên TB</small></div>'
+          + '<div class="mrc-hit">' + (s.hitRate !== null ? 'Có trùng: ' + s.hitRate + '%' : 'Chưa có dữ liệu') + '</div>'
+          + '<div class="mrc-baseline">TB mỗi bộ: <b>' + (avgPerSet !== null ? avgPerSet.toFixed(2) : '—')
+          + '</b> · baseline ' + baseline.toFixed(2)
+          + (delta !== null ? ' · Δ ' + signed(delta) : '') + '</div>'
+          + buildDistBar(s.dist, s.plays)
+          + '<div class="mrc-plays">' + s.plays + ' lần chơi đã so sánh</div>';
+        rankEl.appendChild(card);
+      });
+    }
+
+    // Danh sách so sánh đã được gộp vào "Lịch sử kỳ quay & so sánh" bên dưới
+    renderHistory();
+  }
+
+  function buildDistBar(dist, plays) {
+    if (!plays) return '<div class="mrc-plays" style="margin-top:6px;font-size:0.68rem;color:var(--gray-400)">Chưa có dữ liệu</div>';
+    const maxC = Math.max(1, ...[0,1,2,3,4,5,6].map(i => dist[i] || 0));
+    const bars = [0,1,2,3,4,5,6].map(i => {
+      const c = dist[i] || 0;
+      return '<div class="mrc-dist-bar' + (c>0?' has-data':'') + '" style="height:'
+        + Math.max(3, Math.round(c/maxC*100)*0.18) + 'px" title="' + i + ' số trùng: ' + c + ' lần"></div>';
+    }).join('');
+    const labels = [0,1,2,3,4,5,6].map(i => '<span>' + i + '</span>').join('');
+    return '<div class="mrc-dist">' + bars + '</div><div class="mrc-dist-label">' + labels + '</div>';
+  }
+
+  /* ===== HISTORY (gộp kỳ quay + so sánh, phân trang) ===== */
+  let historyPage = 1, historyPageSize = 5;
+  let finPage = 1, finPageSize = 5;
+
+  (function bindPageSize() {
+    const sel = $('#history-page-size');
+    if (!sel) { setTimeout(bindPageSize, 80); return; }
+    sel.addEventListener('change', () => {
+      historyPageSize = parseInt(sel.value, 10) || 5;
+      historyPage = 1; renderHistory();
+    });
+  })();
+
+  (function bindFinPageSize() {
+    const sel = $('#fin-page-size');
+    if (!sel) { setTimeout(bindFinPageSize, 80); return; }
+    sel.addEventListener('change', () => {
+      finPageSize = parseInt(sel.value, 10) || 5;
+      finPage = 1; renderFinance();
+    });
+  })();
+
+  // Gộp kết quả kỳ quay (state.results) và các bộ số đã so sánh (cmpData.rows)
+  // theo từng ngày quay; mới nhất trước.
+  function buildMergedHistory() {
+    const map = {};
+    (state.results || []).forEach(r => {
+      const key = r.date;
+      if (!map[key]) map[key] = { date: r.date, result: null, cmpRows: [], session: '' };
+      map[key].result  = r;
+      map[key].session = r.session || '';
+    });
+    (cmpData.rows || []).forEach(row => {
+      const raw = row.drawDate || row.createdAt;
+      if (!raw) return;
+      const key = String(raw).slice(0, 10);
+      if (!map[key]) map[key] = { date: key, result: null, cmpRows: [], session: '' };
+      map[key].cmpRows.push(row);
+    });
+    const arr = Object.keys(map).map(k => map[k]);
+    arr.sort((a, b) => {
+      const da = parseDate(a.date), db = parseDate(b.date);
+      return (db ? db.getTime() : 0) - (da ? da.getTime() : 0);
+    });
+    return arr;
+  }
+
+  function renderHistory() {
+    const list = $('#history-list'), paginEl = $('#history-pagination'), emptyEl = $('#history-empty');
+    list.innerHTML = '';
+    const all = buildMergedHistory();
+    if (!all.length) { emptyEl.classList.remove('hidden'); paginEl.classList.add('hidden'); return; }
+    emptyEl.classList.add('hidden');
+
+    const total = all.length, totalPages = Math.ceil(total / historyPageSize);
+    if (historyPage < 1) historyPage = 1;
+    if (historyPage > totalPages) historyPage = totalPages;
+    const start = (historyPage - 1) * historyPageSize;
+    const page  = all.slice(start, start + historyPageSize);
+
+    page.forEach(entry => list.appendChild(buildMergedCard(entry)));
+    renderPagination(paginEl, historyPage, totalPages, total, start, page.length,
+      p => { historyPage = p; renderHistory(); }, 'kỳ');
+  }
+
+  function buildMergedCard(entry) {
+    const item = document.createElement('div');
+    item.className = 'history-item merged-item';
+
+    const r       = entry.result;
+    const cmpRows = entry.cmpRows || [];
+    const hasResult = !!r;
+    const hasCmp    = cmpRows.length > 0;
+
+    let actual = null;
+    if (hasResult) actual = r.numbers;
+    else { const m = cmpRows.find(c => c.actual); if (m) actual = m.actual; }
+
+    // ----- HEAD -----
+    const head = document.createElement('div');
+    head.className = 'merged-head';
+    const badge   = is655() ? 'b655' : '';
+    const typeTxt = hasResult ? r.type : ticketType;
+    const notesText = entry.session || '';
+    head.innerHTML = '<span class="history-date">' + fmtVN(entry.date) + '</span>'
+      + '<span class="history-badge ' + badge + '">' + typeTxt + '</span>'
+      + (notesText ? '<span class="history-notes">' + escapeHtml(notesText) + '</span>' : '');
+
+    const right = document.createElement('div');
+    right.className = 'merged-head-right';
+    if (hasCmp) {
+      const anyDone = cmpRows.some(c => c.bestMatch !== null && c.actual);
+      const st = document.createElement('span');
+      st.className = 'ci-status ' + (anyDone ? 'done' : 'pending');
+      st.textContent = anyDone ? '✅ Đã so sánh' : '⏳ Chờ kết quả';
+      right.appendChild(st);
+    }
+    if (hasResult) {
+      const del = document.createElement('button');
+      del.className = 'btn-delete'; del.title = 'Xoá kỳ quay'; del.textContent = '🗑';
+      del.addEventListener('click', () => {
+        if (!confirm('Xoá kết quả ngày ' + fmtVN(r.date) + '?')) return;
+        showOverlay(true);
+        google.script.run
+          .withSuccessHandler(data => { applyData(data); loadComparison(); })
+          .withFailureHandler(handleFailure)
+          .deleteResult(r.rowIndex, ticketType);
+      });
+      right.appendChild(del);
+    }
+    head.appendChild(right);
+    item.appendChild(head);
+
+    // ----- KẾT QUẢ THỰC TẾ -----
+    if (hasResult) {
+      const resRow = document.createElement('div');
+      resRow.className = 'merged-result';
+      const lbl = document.createElement('span');
+      lbl.className = 'merged-result-lbl'; lbl.textContent = 'KQ';
+      resRow.appendChild(lbl);
+      const balls = document.createElement('div');
+      balls.className = 'history-balls';
+      r.numbers.forEach(n => balls.appendChild(ball(n, true, false)));
+      if (r.special != null) {
+        const sep = document.createElement('span');
+        sep.className = 'ball-sep'; sep.textContent = '+';
+        balls.appendChild(sep);
+        balls.appendChild(ball(r.special, true, true));
+      }
+      resRow.appendChild(balls);
+      item.appendChild(resRow);
+    }
+
+    // ----- CÁC BỘ SỐ GỢI Ý / SO SÁNH -----
+    cmpRows.forEach(row => item.appendChild(buildCmpBlock(row, actual)));
+
+    return item;
+  }
+
+  function buildCmpBlock(row, actual) {
+    const block = document.createElement('div');
+    block.className = 'merged-cmp-block';
+    const meta = METHOD_META[row.method] || { icon:'?', label:row.method, cls:'' };
+    const hasCmp = row.bestMatch !== null && row.actual;
+    const matchedSet = hasCmp ? new Set(row.actual.map(Number))
+                     : (actual ? new Set(actual.map(Number)) : new Set());
+
+    const mhead = document.createElement('div');
+    mhead.className = 'merged-cmp-method';
+    mhead.innerHTML = '<span class="ci-method-badge ' + meta.cls + '">' + meta.icon + ' ' + meta.label + '</span>'
+      + '<span class="merged-cmp-created">Tạo: ' + fmtVN(row.createdAt) + '</span>';
+    block.appendChild(mhead);
+
+    (row.sets || []).forEach((set, si) => {
+      const detail = hasCmp && row.details && row.details[si] ? row.details[si] : null;
+      const count  = detail ? detail.count : null;
+      const setRow = document.createElement('div');
+      setRow.className = 'compare-set-row';
+      const lbl = document.createElement('span');
+      lbl.className = 'compare-set-label'; lbl.textContent = 'B' + (si+1);
+      setRow.appendChild(lbl);
+      const ballsEl = document.createElement('div');
+      ballsEl.className = 'compare-set-balls';
+      set.forEach(n => ballsEl.appendChild(ball(n, true, false, matchedSet.has(n))));
+      setRow.appendChild(ballsEl);
+      if (count !== null) {
+        const b = document.createElement('span');
+        b.className = 'compare-match-badge match-' + Math.min(count, 6);
+        b.textContent = count + '/6 số';
+        setRow.appendChild(b);
+      }
+      block.appendChild(setRow);
+    });
+    return block;
+  }
+
+  function renderPagination(el, current, totalPages, total, start, pageCount, onGo, unit) {
+    unit = unit || 'kỳ';
+    el.innerHTML = '';
+    if (totalPages <= 1) { el.classList.add('hidden'); return; }
+    el.classList.remove('hidden');
+    const info = document.createElement('span');
+    info.className = 'pg-info';
+    info.textContent = (start+1) + '–' + (start+pageCount) + ' / ' + total + ' ' + unit;
+    el.appendChild(info);
+    const btns = document.createElement('div');
+    btns.className = 'pg-btns';
+    btns.appendChild(pgBtn('«', 1, current===1, () => onGo(1)));
+    btns.appendChild(pgBtn('‹', null, current===1, () => onGo(current-1)));
+    const win = pageWindow(current, totalPages, 5);
+    if (win[0] > 1) { const e=document.createElement('span'); e.className='pg-ellipsis'; e.textContent='…'; btns.appendChild(e); }
+    win.forEach(p => {
+      const b = document.createElement('button');
+      b.className = 'pg-num' + (p===current?' active':'');
+      b.textContent = p; b.disabled = p===current;
+      b.addEventListener('click', () => onGo(p));
+      btns.appendChild(b);
+    });
+    if (win[win.length-1] < totalPages) { const e=document.createElement('span'); e.className='pg-ellipsis'; e.textContent='…'; btns.appendChild(e); }
+    btns.appendChild(pgBtn('›', null, current===totalPages, () => onGo(current+1)));
+    btns.appendChild(pgBtn('»', totalPages, current===totalPages, () => onGo(totalPages)));
+    el.appendChild(btns);
+  }
+
+  function pgBtn(label, title, disabled, onClick) {
+    const b = document.createElement('button');
+    b.className = 'pg-nav'; b.textContent = label;
+    if (title) b.title = 'Trang ' + title;
+    b.disabled = disabled;
+    if (!disabled) b.addEventListener('click', onClick);
+    return b;
+  }
+
+  function pageWindow(current, total, size) {
+    let start = Math.max(1, current - Math.floor(size/2));
+    let end = start + size - 1;
+    if (end > total) { end = total; start = Math.max(1, end-size+1); }
+    const pages = [];
+    for (let p = start; p <= end; p++) pages.push(p);
+    return pages;
+  }
+
+/* ===== FINANCE ===== */
+  const PRIZE_LABELS = {
+    jackpot1:'🎰 Jackpot 1', jackpot2:'💜 Jackpot 2', jackpot:'🏆 Độc Đắc',
+    prize1:'🥇 Giải Nhất',   prize2:'🥈 Giải Nhì',   prize3:'🥉 Giải Ba',
+    prize4:'4️⃣ Giải Tư',    prize5:'5️⃣ Giải Năm',   prizeKK:'🎁 Khuyến Khích'
+  };
+  const METHOD_ICONS = { hot:'🔥', cold:'❄️', balanced:'⚖️', random:'🎲' };
+  const TYPE_LABELS  = { '6/55':'Power 6/55', '6/45':'Mega 6/45' };
+
+  function fmtMoney(n) { return (n===null||n===undefined) ? '—' : n.toLocaleString('vi-VN') + 'đ'; }
+  function fmtMoneyShort(n) {
+    if (!n) return '0đ';
+    if (Math.abs(n)>=1e9) return (n/1e9).toFixed(1)+' tỷ';
+    if (Math.abs(n)>=1e6) return (n/1e6).toFixed(1)+' tr';
+    if (Math.abs(n)>=1e3) return (n/1e3).toFixed(0)+'k';
+    return n+'đ';
+  }
+
+  let jackpotRowIndex=null, jackpotType=null, jackpotHasJ2=false;
+
+  function openJackpotModal(rowIndex, type, drawDate, hasJ2, existJ1, existJ2) {
+    jackpotRowIndex=rowIndex; jackpotType=type; jackpotHasJ2=hasJ2;
+    $('#jackpot-modal-subtitle').textContent = TYPE_LABELS[type] + ' — kỳ ' + fmtVN(drawDate);
+    const j1lbl = document.querySelector('#jackpot-j1-field label');
+    if (j1lbl) j1lbl.textContent = 'Jackpot 1 (trùng 6 số chính)';
+    $('#jackpot-j1-input').value = existJ1 || '';
+    const j2field = $('#jackpot-j2-field');
+    j2field.classList.toggle('hidden', !hasJ2);
+    if (hasJ2) $('#jackpot-j2-input').value = existJ2 || '';
+    $('#jackpot-modal').classList.remove('hidden');
+    setTimeout(() => $('#jackpot-j1-input').focus(), 50);
+  }
+
+  $('#jackpot-cancel-btn').addEventListener('click', () => $('#jackpot-modal').classList.add('hidden'));
+  $('#jackpot-modal').addEventListener('click', e => { if (e.target===$('#jackpot-modal')) $('#jackpot-modal').classList.add('hidden'); });
+  $('#jackpot-save-btn').addEventListener('click', () => {
+    const j1 = $('#jackpot-j1-input').value.trim();
+    const j2 = jackpotHasJ2 ? $('#jackpot-j2-input').value.trim() : null;
+    if (!j1) { $('#jackpot-j1-input').focus(); return; }
+    showOverlay(true); $('#jackpot-modal').classList.add('hidden');
+    google.script.run
+      .withSuccessHandler(data => { finData=data; renderFinance(); showOverlay(false); })
+      .withFailureHandler(err => { showOverlay(false); alert('Lưu thất bại: ' + (err&&err.message?err.message:String(err))); })
+      .saveJackpot({ rowIndex:jackpotRowIndex, j1:j1, j2:j2 });
+  });
+
+  function renderFinance() {
+    const d = finData;
+    $('#finance-type-label').textContent = '';
+    $('#fin-total-cost').textContent  = fmtMoney(d.totalCost);
+    $('#fin-total-prize').textContent = fmtMoney(d.totalPrize);
+    const netEl = $('#fin-net');
+    netEl.textContent = (d.net>=0?'+':'') + fmtMoney(d.net);
+    const netCard = $('#fin-card-net');
+    netCard.classList.remove('positive','negative');
+    netCard.classList.add(d.net>=0?'positive':'negative');
+
+    let costNote = $('#fin-cost-note');
+    if (!costNote) {
+      costNote = document.createElement('div');
+      costNote.id='fin-cost-note'; costNote.className='fin-card-note';
+      $('#fin-total-cost').parentNode.appendChild(costNote);
+    }
+    costNote.style.display = d.pendingCost>0 ? '' : 'none';
+    if (d.pendingCost>0) costNote.textContent = '(⏳ ' + fmtMoneyShort(d.pendingCost) + ' chờ KQ)';
+
+    // By type — chỉ hiện loại đã chơi
+    const typeGrid = $('#fin-type-grid'); typeGrid.innerHTML = '';
+    ['6/45','6/55'].forEach(t => {
+      const s = d.byType[t] || { cost:0, prize:0, net:0, plays:0 };
+      if (s.plays===0 && s.cost===0) return;
+      const row = document.createElement('div');
+      row.className = 'fin-breakdown-row';
+      row.innerHTML = '<div class="fin-breakdown-name">' + TYPE_LABELS[t]
+        + ' <span style="font-size:.7rem;color:var(--gray-400)">' + s.plays + ' lần</span></div>'
+        + '<div class="fin-breakdown-nums">'
+        + '<span class="fin-bd-item">Chi: <b>' + fmtMoneyShort(s.cost) + '</b></span>'
+        + '<span class="fin-bd-item">Thưởng: <b>' + fmtMoneyShort(s.prize) + '</b></span>'
+        + '<span class="fin-bd-item ' + (s.net>=0?'positive':'negative') + '">'
+        + (s.net>=0?'Lãi':'Lỗ') + ': <b>' + fmtMoneyShort(Math.abs(s.net)) + '</b></span></div>';
+      typeGrid.appendChild(row);
+    });
+
+    // By method
+    const methodGrid = $('#fin-method-grid'); methodGrid.innerHTML = '';
+    ['hot','cold','balanced','random'].forEach(m => {
+      const s = d.byMethod[m] || { cost:0, prize:0, net:0, plays:0 };
+      const icon = METHOD_ICONS[m]||'', meta = METHOD_META[m]||{label:m};
+      const row = document.createElement('div');
+      row.className = 'fin-breakdown-row';
+      row.innerHTML = '<div class="fin-breakdown-name">' + icon + ' ' + meta.label
+        + ' <span style="font-size:.7rem;color:var(--gray-400)">' + s.plays + ' lần</span></div>'
+        + '<div class="fin-breakdown-nums">'
+        + '<span class="fin-bd-item">Chi: <b>' + fmtMoneyShort(s.cost) + '</b></span>'
+        + '<span class="fin-bd-item">Thưởng: <b>' + fmtMoneyShort(s.prize) + '</b></span>'
+        + '<span class="fin-bd-item ' + (s.net>=0?'positive':'negative') + '">'
+        + (s.net>=0?'Lãi':'Lỗ') + ': <b>' + fmtMoneyShort(Math.abs(s.net)) + '</b></span></div>';
+      methodGrid.appendChild(row);
+    });
+
+    // Sessions (phân trang — mặc định 5 lần)
+    const sessionsEl=$('#fin-sessions'), emptyEl=$('#fin-empty'), finPaginEl=$('#fin-pagination');
+    sessionsEl.innerHTML='';
+    if (!d.sessions.length) {
+      emptyEl.classList.remove('hidden');
+      if (finPaginEl) finPaginEl.classList.add('hidden');
+    } else {
+      emptyEl.classList.add('hidden');
+      const totalF = d.sessions.length;
+      const totalPagesF = Math.ceil(totalF / finPageSize);
+      if (finPage < 1) finPage = 1;
+      if (finPage > totalPagesF) finPage = totalPagesF;
+      const startF = (finPage - 1) * finPageSize;
+      const pageF  = d.sessions.slice(startF, startF + finPageSize);
+      pageF.forEach(s => sessionsEl.appendChild(buildSessionCard(s)));
+      if (finPaginEl) renderPagination(finPaginEl, finPage, totalPagesF, totalF, startF, pageF.length,
+        p => { finPage = p; renderFinance(); }, 'lần');
+    }
+
+    const pendingEl=$('#fin-pending'), pendingTitle=$('#fin-pending-title'); pendingEl.innerHTML='';
+    if (d.pending.length) { pendingTitle.style.display=''; d.pending.forEach(s => pendingEl.appendChild(buildSessionCard(s))); }
+    else { pendingTitle.style.display='none'; }
+  }
+
+  function buildSessionCard(s) {
+    const item = document.createElement('div'); item.className='fin-session';
+    const head = document.createElement('div'); head.className='fin-session-head';
+    const meta = METHOD_META[s.method] || { icon:'?', label:s.method, cls:'' };
+    head.innerHTML = '<span class="fin-session-date">📅 ' + fmtVN(s.drawDate) + '</span>'
+      + '<span class="ci-method-badge ' + meta.cls + '">' + meta.icon + ' ' + meta.label + '</span>'
+      + '<span class="history-badge ' + (s.type==='6/55'?'b655':'') + '">' + s.type + '</span>'
+      + '<span style="font-size:.72rem;color:var(--gray-400);margin-left:auto">' + s.numSets + ' bộ × ' + fmtMoneyShort(finData.ticketPrice) + '</span>';
+    item.appendChild(head);
+
+    const body = document.createElement('div'); body.className='fin-session-body';
+    if (s.hasResult) {
+      const net=s.net, moneyRow=document.createElement('div');
+      moneyRow.className='fin-money-row';
+      moneyRow.innerHTML =
+        '<div class="fin-money-item cost"><span class="fin-money-val">' + fmtMoneyShort(s.totalCost) + '</span><span class="fin-money-lbl">Đã chi</span></div>'
+        + '<div class="fin-money-item prize"><span class="fin-money-val">' + fmtMoneyShort(s.totalPrize) + '</span><span class="fin-money-lbl">Thưởng nhận</span></div>'
+        + '<div class="fin-money-item ' + (net>=0?'net-pos':'net-neg') + '"><span class="fin-money-val">' + (net>=0?'+':'') + fmtMoneyShort(net) + '</span><span class="fin-money-lbl">' + (net>=0?'Lãi':'Lỗ') + '</span></div>';
+      body.appendChild(moneyRow);
+
+      if (s.prizes && s.prizes.length) {
+        const prizesEl=document.createElement('div'); prizesEl.className='fin-prizes';
+        s.prizes.forEach(p => {
+          const prow=document.createElement('div'); prow.className='fin-prize-row';
+          const lbl=document.createElement('span');
+          lbl.className='fin-prize-label '+p.label;
+          lbl.textContent=(PRIZE_LABELS[p.label]||p.label)+' (Bộ '+(p.setIdx+1)+')';
+          prow.appendChild(lbl);
+          if (p.needInput) {
+            const ej1=s.jackpot&&s.jackpot.j1?s.jackpot.j1:0;
+            const amt=document.createElement('span');
+            amt.className='fin-prize-amount'+(ej1?'':' pending');
+            amt.textContent=ej1?fmtMoney(ej1):'Chưa nhập';
+            prow.appendChild(amt);
+            const btn=document.createElement('button'); btn.className='btn-jackpot';
+            btn.textContent=ej1?'✏️ Sửa':'🎉 Nhập tiền';
+            btn.addEventListener('click',()=>openJackpotModal(s.rowIndex,s.type,s.drawDate,s.type==='6/55',ej1,s.jackpot&&s.jackpot.j2));
+            prow.appendChild(btn);
+          } else if (p.label==='jackpot2') {
+            const ej2=s.jackpot&&s.jackpot.j2?s.jackpot.j2:0;
+            const amt=document.createElement('span');
+            amt.className='fin-prize-amount'+(ej2?'':' pending');
+            amt.textContent=ej2?fmtMoney(ej2):'Chưa nhập';
+            prow.appendChild(amt);
+            const btn=document.createElement('button'); btn.className='btn-jackpot';
+            btn.textContent=ej2?'✏️ Sửa':'🎉 Nhập tiền';
+            btn.addEventListener('click',()=>openJackpotModal(s.rowIndex,s.type,s.drawDate,true,s.jackpot&&s.jackpot.j1,ej2));
+            prow.appendChild(btn);
+          } else {
+            const amt=document.createElement('span'); amt.className='fin-prize-amount';
+            amt.textContent=fmtMoney(p.prize); prow.appendChild(amt);
+          }
+          prizesEl.appendChild(prow);
+        });
+        body.appendChild(prizesEl);
+      } else {
+        const noWin=document.createElement('p');
+        noWin.style.cssText='font-size:.8rem;color:var(--gray-400);margin:4px 0 0';
+        noWin.textContent='Không trúng giải nào'; body.appendChild(noWin);
+      }
+    } else {
+      const msg=document.createElement('p');
+      msg.style.cssText='font-size:.8rem;color:var(--gray-400);margin:0';
+      msg.textContent='⏳ Chờ kết quả kỳ quay — '+s.numSets+' bộ × '+fmtMoney(finData.ticketPrice)+' = '+fmtMoney(s.totalCost);
+      body.appendChild(msg);
+    }
+    item.appendChild(body);
+    return item;
+  }
+
+/* ===== FORM SUBMIT ===== */
+  $('#entry-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const fd=new FormData(e.target), formType=fd.get('type');
+    const is55=formType==='6/55';
+    const numbers=[];
+    for (let i=1;i<=6;i++) numbers.push(fd.get('n'+i));
+    const special=is55?fd.get('n7'):null;
+    const payload={
+      date:fd.get('date'), type:formType,
+      numbers:numbers, special:special,
+      notes:fd.get('notes')||''
+    };
+
+    const msg=$('#form-msg'); msg.classList.add('hidden');
+    const fail=text=>{msg.textContent='❌ '+text;msg.className='msg error';msg.classList.remove('hidden');};
+
+    const ints=numbers.map(x=>parseInt(x,10));
+    if (ints.some(isNaN))               { fail('Cần nhập đủ 6 số chính.'); return; }
+    if (new Set(ints).size!==6)         { fail('6 số chính không được trùng nhau.'); return; }
+    if (is55) {
+      const sp=parseInt(special,10);
+      if (isNaN(sp))           { fail('Cần nhập số đặc biệt.'); return; }
+      if (sp<1||sp>55)         { fail('Số đặc biệt phải từ 1–55.'); return; }
+      if (ints.indexOf(sp)>=0) { fail('Số đặc biệt không được trùng số chính.'); return; }
+    }
+
+    showOverlay(true);
+    google.script.run
+      .withSuccessHandler(data => {
+        if (data.ticketType!==ticketType) {
+          ticketType=data.ticketType;
+          $$('.type-btn').forEach(b=>b.classList.toggle('active',b.dataset.type===ticketType));
+          syncRangeHint();
+        }
+        applyData(data, () => {
+          loadComparison(); loadFinance();
+          e.target.reset(); setDefaults();
+          msg.textContent='✅ Đã lưu kết quả!'; msg.className='msg success'; msg.classList.remove('hidden');
+          setTimeout(()=>msg.classList.add('hidden'),3000);
+          if (window.innerWidth<768) { switchTab('stats'); window.scrollTo({top:0,behavior:'smooth'}); }
+        });
+      })
+      .withFailureHandler(err=>{
+        showOverlay(false);
+        msg.textContent='❌ '+(err&&err.message?err.message:String(err));
+        msg.className='msg error'; msg.classList.remove('hidden');
+      })
+      .addResult(payload);
+  });
+
+  $('#form-type').addEventListener('change', e => {
+    if (e.target.name==='type') applyTypeToForm(e.target.value);
+  });
+
+  $('#entry-form').addEventListener('reset', () => {
+    setTimeout(()=>{
+      const checked=document.querySelector('input[name=type]:checked');
+      applyTypeToForm(checked?checked.value:ticketType);
+    }, 0);
+  });
+
+  /* ===== REFRESH & INIT ===== */
+  $('#btn-refresh').addEventListener('click', load);
+
+  function setDefaults() {
+    $('input[name=date]').value = todayIso();
+    const radio=document.querySelector('input[name=type][value="'+ticketType+'"]');
+    if (radio) radio.checked=true;
+    applyTypeToForm(ticketType);
+  }
+
+  setDefaults();
+  setDrawDateDefault();
+  syncRangeHint();
+  applyTab('generate');
+  load();
+
+})();
+</script>

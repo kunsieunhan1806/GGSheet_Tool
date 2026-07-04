@@ -1,0 +1,561 @@
+<script>
+(function () {
+  'use strict';
+
+  let state = { records: [], forecast: null };
+  let viewMode = loadViewMode();
+  let calCursor = new Date();
+  calCursor.setDate(1);
+
+  /* ---------- UTIL ---------- */
+  const $ = sel => document.querySelector(sel);
+  const $$ = sel => document.querySelectorAll(sel);
+
+  function loadViewMode() {
+    try {
+      return localStorage.getItem('cycleViewMode') === 'ttc' ? 'ttc' : 'track';
+    } catch (err) {
+      return 'track';
+    }
+  }
+
+  function saveViewMode(mode) {
+    try {
+      localStorage.setItem('cycleViewMode', mode);
+    } catch (err) {
+      // localStorage có thể bị chặn trong một số iframe.
+    }
+  }
+
+  function applyMode() {
+    document.body.dataset.mode = viewMode;
+    $$('.mode-btn').forEach(btn => {
+      const active = btn.dataset.mode === viewMode;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+
+  function showOverlay(show) {
+    $('#overlay').classList.toggle('hidden', !show);
+  }
+
+  /**
+   * Wrapper an toàn cho việc cập nhật state + render sau khi nhận data từ server.
+   * Đảm bảo overlay LUÔN được tắt, ngay cả khi render ném exception.
+   */
+  function applyData(data, onSuccess) {
+    try {
+      state = data;
+      render();
+      if (onSuccess) onSuccess();
+    } catch (err) {
+      console.error('Render error:', err);
+      const msg = $('#form-msg');
+      if (msg) {
+        msg.textContent = '⚠️ Lỗi hiển thị: ' + (err && err.message ? err.message : err);
+        msg.className = 'msg error';
+        msg.classList.remove('hidden');
+      } else {
+        alert('Lỗi hiển thị: ' + (err && err.message ? err.message : err));
+      }
+    } finally {
+      showOverlay(false);
+    }
+  }
+
+  function handleFailure(err) {
+    showOverlay(false);
+    const msg = $('#form-msg');
+    const text = '❌ ' + (err && err.message ? err.message : String(err));
+    if (msg && !$('#panel-form').classList.contains('hidden')) {
+      msg.textContent = text;
+      msg.className = 'msg error';
+      msg.classList.remove('hidden');
+    } else {
+      alert(text);
+    }
+  }
+
+  function parseDate(iso) {
+    if (!iso) return null;
+    const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (!m) return null;
+    return new Date(+m[1], +m[2] - 1, +m[3]);
+  }
+
+  function fmtVN(iso) {
+    const d = parseDate(iso);
+    if (!d) return '—';
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const weekdays = ['CN', 'Thứ 2', 'Thứ 3', 'Thứ 4', 'Thứ 5', 'Thứ 6', 'Thứ 7'];
+    return weekdays[d.getDay()] + ', ' + dd + '/' + mm + '/' + d.getFullYear();
+  }
+
+  function fmtShort(iso) {
+    const d = parseDate(iso);
+    if (!d) return '—';
+    return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + d.getFullYear();
+  }
+
+  function daysFromToday(iso) {
+    const d = parseDate(iso);
+    if (!d) return null;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return Math.round((d - today) / 86400000);
+  }
+
+  function countdownText(iso, label) {
+    const n = daysFromToday(iso);
+    if (n === null) return '';
+    if (n === 0) return label + ' hôm nay';
+    if (n > 0) return 'Còn ' + n + ' ngày';
+    return 'Đã qua ' + (-n) + ' ngày';
+  }
+
+  function daysBetween(a, b) {
+    if (!a || !b) return null;
+    const x = new Date(a.getFullYear(), a.getMonth(), a.getDate());
+    const y = new Date(b.getFullYear(), b.getMonth(), b.getDate());
+    return Math.round((x - y) / 86400000);
+  }
+
+  function isSameDate(a, b) {
+    return a && b
+      && a.getFullYear() === b.getFullYear()
+      && a.getMonth() === b.getMonth()
+      && a.getDate() === b.getDate();
+  }
+
+  function isBetween(d, start, end) {
+    if (!d || !start || !end) return false;
+    return d >= start && d <= end;
+  }
+
+  /* ---------- TABS (mobile) ---------- */
+  $$('.tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const target = btn.dataset.tab;
+      $$('.tab').forEach(b => b.classList.toggle('active', b === btn));
+      $$('.panel').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== target));
+    });
+  });
+
+  $$('.mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      viewMode = btn.dataset.mode === 'ttc' ? 'ttc' : 'track';
+      saveViewMode(viewMode);
+      applyMode();
+      renderForecast();
+    });
+  });
+
+  /* ---------- LOAD DATA ---------- */
+  function load() {
+    showOverlay(true);
+    google.script.run
+      .withSuccessHandler(data => applyData(data))
+      .withFailureHandler(handleFailure)
+      .getCycleData();
+  }
+
+  /* ---------- RENDER ---------- */
+  function render() {
+    applyMode();
+    renderForecast();
+    renderCalendar();
+    renderCycleChart();
+    renderHistory();
+  }
+
+  function renderForecast() {
+    const f = state.forecast;
+    if (!f) {
+      $('#forecast-empty').classList.remove('hidden');
+      $('#forecast-body').classList.add('hidden');
+      $('#mini-cal').classList.add('hidden');
+      return;
+    }
+    $('#forecast-empty').classList.add('hidden');
+    $('#forecast-body').classList.remove('hidden');
+    $('#mini-cal').classList.remove('hidden');
+
+    renderModeCard(f);
+
+    // Banner cảnh báo chu kỳ không đều
+    if (f.isIrregular) {
+      $('#irregular-warning').classList.remove('hidden');
+      $('#warn-spread').textContent = f.spread;
+    } else {
+      $('#irregular-warning').classList.add('hidden');
+    }
+
+    // ===== KỲ KINH TIẾP THEO - RANGE =====
+    $('#f-next-min').textContent = fmtShort(f.nextPeriodEarliest);
+    $('#f-next-likely').textContent = fmtShort(f.nextPeriodLikely);
+    $('#f-next-max').textContent = fmtShort(f.nextPeriodLatest);
+    $('#f-next-count').textContent = countdownText(f.nextPeriodLikely, 'Bắt đầu');
+
+    // ===== RỤNG TRỨNG - RANGE =====
+    $('#f-ov-min').textContent = fmtShort(f.ovulationEarliest);
+    $('#f-ov-likely').textContent = fmtShort(f.ovulationLikely);
+    $('#f-ov-max').textContent = fmtShort(f.ovulationLatest);
+    $('#f-ov-count').textContent = countdownText(f.ovulationLikely, 'Rụng trứng');
+
+    // ===== CỬA SỔ THỤ THAI =====
+    $('#f-fertile-likely').textContent = fmtShort(f.fertileLikelyStart) + ' → ' + fmtShort(f.fertileLikelyEnd);
+    $('#f-fertile-full').textContent = fmtShort(f.fertileStart) + ' → ' + fmtShort(f.fertileEnd);
+    $('#f-fertile-peak').textContent = fmtShort(f.fertilePeakStart) + ' → ' + fmtShort(f.fertilePeakEnd);
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const fs = parseDate(f.fertileStart);
+    const fe = parseDate(f.fertileEnd);
+    const fls = parseDate(f.fertileLikelyStart);
+    const fle = parseDate(f.fertileLikelyEnd);
+    let statusHtml = '';
+    if (fls && fle && today >= fls && today <= fle) {
+      statusHtml = '🔥 <b style="color:var(--teal-400)">Đang trong cửa sổ thụ thai (cao nhất)</b>';
+    } else if (fs && fe && today >= fs && today <= fe) {
+      statusHtml = '✨ <b style="color:var(--teal-400)">Đang trong cửa sổ thụ thai</b>';
+    } else if (fs && today < fs) {
+      statusHtml = 'Bắt đầu sau ' + Math.round((fs - today) / 86400000) + ' ngày';
+    } else if (fe && today > fe) {
+      statusHtml = 'Đã kết thúc';
+    }
+    $('#f-fertile-count').innerHTML = statusHtml;
+
+    // ===== THỐNG KÊ CHU KỲ =====
+    $('#f-cycle-min').textContent = f.minCycle;
+    $('#f-cycle-median').textContent = f.likelyCycle;
+    $('#f-cycle-max').textContent = f.maxCycle;
+    $('#f-samples').textContent = f.cycleSamples;
+    $('#f-confidence').textContent = 'Độ tin cậy: ' + (f.confidenceLabel || '—');
+    $('#f-confidence').className = 'confidence-pill confidence-' + (f.confidence || 'low');
+
+    const notes = [];
+    if (f.rawCycleCount && f.outlierCount) {
+      $('#f-sample-note').innerHTML = 'Dựa trên <b id="f-samples">' + f.cycleSamples + '</b>/' + f.rawCycleCount + ' chu kỳ dùng để dự báo';
+      notes.push('Đã bỏ qua ' + f.outlierCount + ' chu kỳ bất thường khi tính min/median/max. Biểu đồ bên dưới đánh dấu chu kỳ bị bỏ qua bằng viền gạch.');
+    } else {
+      $('#f-sample-note').innerHTML = 'Dựa trên <b id="f-samples">' + f.cycleSamples + '</b> chu kỳ đã ghi nhận';
+    }
+
+    if (f.confidenceNote) notes.push(f.confidenceNote);
+    if (notes.length) {
+      $('#smart-forecast-note').textContent = notes.join(' ');
+      $('#smart-forecast-note').classList.remove('hidden');
+    } else {
+      $('#smart-forecast-note').classList.add('hidden');
+    }
+  }
+
+  function renderModeCard(f) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    if (viewMode === 'ttc') {
+      const fertileStart = parseDate(f.fertileStart);
+      const fertileEnd = parseDate(f.fertileEnd);
+      const likelyStart = parseDate(f.fertileLikelyStart);
+      const likelyEnd = parseDate(f.fertileLikelyEnd);
+      let main = 'Theo dõi cửa sổ thụ thai';
+
+      if (likelyStart && likelyEnd && today >= likelyStart && today <= likelyEnd) {
+        main = 'Đang ở cửa sổ thụ thai cao nhất';
+      } else if (fertileStart && fertileEnd && today >= fertileStart && today <= fertileEnd) {
+        main = 'Đang trong cửa sổ thụ thai';
+      } else if (fertileStart && today < fertileStart) {
+        main = 'Cửa sổ thụ thai bắt đầu sau ' + daysBetween(fertileStart, today) + ' ngày';
+      } else if (fertileEnd && today > fertileEnd) {
+        main = 'Cửa sổ thụ thai kỳ này đã qua';
+      }
+
+      $('#mode-card-label').textContent = 'Trọng tâm thụ thai';
+      $('#mode-main').textContent = main;
+      $('#mode-support').textContent = 'Rụng trứng khả năng cao: ' + fmtShort(f.ovulationLikely) + '. Cao điểm dự đoán: ' + fmtShort(f.fertilePeakStart) + ' → ' + fmtShort(f.fertilePeakEnd) + '.';
+      $('#mode-chip-a').textContent = countdownText(f.ovulationLikely, 'Rụng trứng') || 'Rụng trứng: —';
+      $('#mode-chip-b').textContent = 'Dải trung tâm: ' + fmtShort(f.fertileLikelyStart) + ' → ' + fmtShort(f.fertileLikelyEnd);
+      return;
+    }
+
+    const lastStart = parseDate(f.lastStart);
+    const cycleDay = lastStart ? daysBetween(today, lastStart) + 1 : null;
+    $('#mode-card-label').textContent = 'Trọng tâm chu kỳ';
+    $('#mode-main').textContent = cycleDay && cycleDay > 0 ? 'Ngày thứ ' + cycleDay + ' của chu kỳ' : 'Theo dõi kỳ kinh tiếp theo';
+    $('#mode-support').textContent = 'Kỳ kinh tiếp theo khả năng cao: ' + fmtShort(f.nextPeriodLikely) + '.';
+    $('#mode-chip-a').textContent = countdownText(f.nextPeriodLikely, 'Bắt đầu') || 'Kỳ kinh: —';
+    $('#mode-chip-b').textContent = 'Tin cậy: ' + (f.confidenceLabel || '—');
+  }
+
+  function renderCycleChart() {
+    const chart = $('#cycle-chart');
+    if (!chart) return;
+
+    const empty = $('#cycle-chart-empty');
+    const series = state.forecast && state.forecast.cycleSeries ? state.forecast.cycleSeries : [];
+    chart.innerHTML = '';
+
+    if (!series.length) {
+      empty.classList.remove('hidden');
+      return;
+    }
+
+    empty.classList.add('hidden');
+    const maxDays = Math.max.apply(null, series.map(item => item.days).concat([35]));
+
+    series.forEach((item, idx) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'chart-bar-wrap' + (item.isOutlier ? ' is-outlier' : '');
+      wrap.title = fmtShort(item.from) + ' → ' + fmtShort(item.to) + ': ' + item.days + ' ngày';
+
+      const value = document.createElement('div');
+      value.className = 'chart-value';
+      value.textContent = item.days;
+      wrap.appendChild(value);
+
+      const bar = document.createElement('div');
+      bar.className = 'chart-bar';
+      bar.style.height = Math.max(18, Math.round((item.days / maxDays) * 124)) + 'px';
+      wrap.appendChild(bar);
+
+      const label = document.createElement('div');
+      label.className = 'chart-label';
+      label.textContent = fmtShort(item.to).slice(0, 5);
+      wrap.appendChild(label);
+
+      if (idx === series.length - 1) wrap.classList.add('is-latest');
+      chart.appendChild(wrap);
+    });
+  }
+
+  /* ---------- MINI CALENDAR ---------- */
+  function renderCalendar() {
+    if (!state.records.length) return;
+
+    const grid = $('#cal-grid');
+    grid.innerHTML = '';
+
+    const year = calCursor.getFullYear();
+    const month = calCursor.getMonth();
+    const monthNames = ['Tháng 1','Tháng 2','Tháng 3','Tháng 4','Tháng 5','Tháng 6','Tháng 7','Tháng 8','Tháng 9','Tháng 10','Tháng 11','Tháng 12'];
+    $('#cal-title').textContent = monthNames[month] + ' ' + year;
+
+    // Headers
+    ['CN','T2','T3','T4','T5','T6','T7'].forEach(h => {
+      const c = document.createElement('div');
+      c.className = 'cal-cell head';
+      c.textContent = h;
+      grid.appendChild(c);
+    });
+
+    const firstDay = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const today = new Date(); today.setHours(0,0,0,0);
+
+    // Periods (actual, recorded)
+    const periods = state.records
+      .map(r => ({ start: parseDate(r.start), end: parseDate(r.end) || parseDate(r.start) }))
+      .filter(p => p.start);
+
+    // Predicted ranges from forecast
+    const f = state.forecast;
+    const nextEarliest = f ? parseDate(f.nextPeriodEarliest) : null;
+    const nextLikely = f ? parseDate(f.nextPeriodLikely) : null;
+    const nextLatest = f ? parseDate(f.nextPeriodLatest) : null;
+    const ovEarliest = f ? parseDate(f.ovulationEarliest) : null;
+    const ovLikely = f ? parseDate(f.ovulationLikely) : null;
+    const ovLatest = f ? parseDate(f.ovulationLatest) : null;
+    const fertileStart = f ? parseDate(f.fertileStart) : null;
+    const fertileEnd = f ? parseDate(f.fertileEnd) : null;
+    const fertileLikelyStart = f ? parseDate(f.fertileLikelyStart) : null;
+    const fertileLikelyEnd = f ? parseDate(f.fertileLikelyEnd) : null;
+
+    // Padding before first day
+    for (let i = 0; i < firstDay; i++) {
+      const c = document.createElement('div');
+      c.className = 'cal-cell muted';
+      grid.appendChild(c);
+    }
+
+    for (let d = 1; d <= daysInMonth; d++) {
+      const cell = document.createElement('div');
+      cell.className = 'cal-cell';
+      cell.textContent = d;
+      const cur = new Date(year, month, d);
+
+      if (isSameDate(cur, today)) cell.classList.add('today');
+
+      // Actual period (recorded)
+      const inActualPeriod = periods.some(p => isBetween(cur, p.start, p.end));
+      if (inActualPeriod) {
+        cell.classList.add('period');
+        cell.title = 'Hành kinh thực tế';
+        grid.appendChild(cell);
+        continue;
+      }
+
+      // ----- Layered predictions (ưu tiên: rụng trứng > thụ thai > kỳ kinh) -----
+      // Predicted period window (toàn dải: earliest → latest + 5 ngày)
+      const predPeriodEnd = nextLatest ? new Date(nextLatest.getTime() + 5 * 86400000) : null;
+      if (isBetween(cur, nextEarliest, predPeriodEnd)) {
+        const isLikely = isSameDate(cur, nextLikely);
+        cell.classList.add('predicted-period');
+        if (isLikely) cell.classList.add('likely');
+        cell.title = isLikely ? 'Kỳ kinh dự đoán (khả năng cao)' : 'Kỳ kinh có thể xảy ra';
+      }
+
+      // Cửa sổ thụ thai toàn dải
+      if (isBetween(cur, fertileStart, fertileEnd)) {
+        cell.classList.add('predicted-fertile');
+        cell.title = 'Cửa sổ thụ thai (toàn dải)';
+      }
+
+      // Cửa sổ thụ thai khả năng cao - đè lên
+      if (isBetween(cur, fertileLikelyStart, fertileLikelyEnd)) {
+        cell.classList.remove('predicted-fertile');
+        cell.classList.add('fertile');
+        cell.title = 'Cửa sổ thụ thai (khả năng cao)';
+      }
+
+      // Rụng trứng - đè lên cùng
+      if (isBetween(cur, ovEarliest, ovLatest)) {
+        cell.classList.remove('fertile', 'predicted-fertile');
+        const isLikely = isSameDate(cur, ovLikely);
+        cell.classList.add(isLikely ? 'ov' : 'predicted-ov');
+        if (isLikely) cell.title = 'Rụng trứng (khả năng cao)';
+        else cell.title = 'Rụng trứng có thể xảy ra';
+      }
+
+      grid.appendChild(cell);
+    }
+  }
+
+  $('#cal-prev').addEventListener('click', () => {
+    calCursor.setMonth(calCursor.getMonth() - 1);
+    renderCalendar();
+  });
+  $('#cal-next').addEventListener('click', () => {
+    calCursor.setMonth(calCursor.getMonth() + 1);
+    renderCalendar();
+  });
+
+  /* ---------- HISTORY ---------- */
+  function renderHistory() {
+    const list = $('#history-list');
+    list.innerHTML = '';
+
+    if (!state.records.length) {
+      $('#history-empty').classList.remove('hidden');
+      return;
+    }
+    $('#history-empty').classList.add('hidden');
+
+    state.records.forEach(r => {
+      const item = document.createElement('div');
+      item.className = 'history-item';
+
+      const main = document.createElement('div');
+      main.className = 'history-item-main';
+
+      const dates = document.createElement('div');
+      dates.className = 'history-dates';
+      dates.textContent = fmtShort(r.start) + (r.end ? ' → ' + fmtShort(r.end) : '');
+      main.appendChild(dates);
+
+      const meta = document.createElement('div');
+      meta.className = 'history-meta';
+      meta.innerHTML =
+        '<span>📅 Chu kỳ: <b>' + r.cycleDays + ' ngày</b></span>' +
+        (r.periodDays ? '<span>🌸 Hành kinh: <b>' + r.periodDays + ' ngày</b></span>' : '') +
+        (r.ovulation ? '<span>🥚 Rụng trứng: <b>' + fmtShort(r.ovulation) + '</b></span>' : '');
+      main.appendChild(meta);
+
+      if (r.notes) {
+        const notes = document.createElement('div');
+        notes.className = 'history-notes';
+        notes.textContent = '"' + r.notes + '"';
+        main.appendChild(notes);
+      }
+
+      item.appendChild(main);
+
+      const actions = document.createElement('div');
+      actions.className = 'history-actions';
+      const del = document.createElement('button');
+      del.className = 'btn-delete';
+      del.title = 'Xoá';
+      del.textContent = '🗑';
+      del.addEventListener('click', () => {
+        if (!confirm('Xoá kỳ kinh ngày ' + fmtShort(r.start) + '?')) return;
+        showOverlay(true);
+        google.script.run
+          .withSuccessHandler(data => applyData(data))
+          .withFailureHandler(handleFailure)
+          .deleteCycleEntry(r.rowIndex);
+      });
+      actions.appendChild(del);
+      item.appendChild(actions);
+
+      list.appendChild(item);
+    });
+  }
+
+  /* ---------- FORM SUBMIT ---------- */
+  $('#entry-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const payload = {
+      start: fd.get('start'),
+      end: fd.get('end'),
+      notes: fd.get('notes') || ''
+    };
+    const msg = $('#form-msg');
+    msg.classList.add('hidden');
+
+    showOverlay(true);
+    google.script.run
+      .withSuccessHandler(data => {
+        applyData(data, function () {
+          // Chỉ chạy khi render OK
+          e.target.reset();
+          setDefaults();
+          msg.textContent = '✅ Đã lưu thành công!';
+          msg.className = 'msg success';
+          msg.classList.remove('hidden');
+          setTimeout(() => msg.classList.add('hidden'), 3000);
+
+          // Trên mobile: chuyển sang tab dự báo
+          if (window.innerWidth < 768) {
+            $$('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === 'forecast'));
+            $$('.panel').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== 'forecast'));
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }
+        });
+      })
+      .withFailureHandler(err => {
+        showOverlay(false);
+        msg.textContent = '❌ ' + (err && err.message ? err.message : String(err));
+        msg.className = 'msg error';
+        msg.classList.remove('hidden');
+      })
+      .addCycleEntry(payload);
+  });
+
+  /* ---------- REFRESH ---------- */
+  $('#btn-refresh').addEventListener('click', load);
+
+  /* ---------- DEFAULTS ---------- */
+  function setDefaults() {
+    const today = new Date();
+    const iso = today.toISOString().slice(0, 10);
+    $('input[name=start]').value = iso;
+  }
+
+  applyMode();
+  setDefaults();
+  load();
+})();
+</script>
