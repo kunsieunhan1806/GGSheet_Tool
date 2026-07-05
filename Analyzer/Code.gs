@@ -464,9 +464,11 @@ function saveJackpot(payload) {
 
 /**
  * Cài trigger tự lấy kết quả Vietlott sau giờ quay.
- * Chạy hàm này một lần trong Apps Script editor để cấp quyền UrlFetchApp/ScriptApp/MailApp.
+ * Chạy hàm này một lần trong Apps Script editor để cấp quyền UrlFetchApp/ScriptApp.
  */
 function installVietlottAutoFetchTriggers() {
+  authorizeVietlottAutoFetch();
+
   const handlers = ['autoFetchMega645', 'autoFetchPower655'];
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
     if (handlers.indexOf(trigger.getHandlerFunction()) >= 0) {
@@ -480,6 +482,33 @@ function installVietlottAutoFetchTriggers() {
     .forEach(function (day) { createVietlottWeeklyTrigger('autoFetchPower655', day); });
 
   return 'Đã cài trigger Vietlott: Mega 6/45 (T4, T6, CN) và Power 6/55 (T3, T5, T7), khoảng 19:10.';
+}
+
+/**
+ * Chạy một lần sau khi deploy/cập nhật code để Apps Script hỏi đủ quyền:
+ * - UrlFetchApp: lấy kết quả Vietlott
+ * - ScriptApp: tạo time-driven trigger
+ * - SpreadsheetApp: đọc/ghi sheet hiện tại
+ */
+function authorizeVietlottAutoFetch() {
+  UrlFetchApp.fetch(VIETLOTT_URLS['6/45'], {
+    muteHttpExceptions: true,
+    followRedirects: true,
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Google Apps Script Vietlott checker)' }
+  });
+  ScriptApp.getProjectTriggers();
+  SpreadsheetApp.getActiveSpreadsheet().getId();
+  clearVietlottPermissionError();
+  return 'Đã yêu cầu/cấp đủ quyền cho Vietlott auto-fetch.';
+}
+
+function clearVietlottPermissionError() {
+  const props = PropertiesService.getDocumentProperties();
+  const status = parseJsonSafe(props.getProperty(VIETLOTT_LAST_ERROR_PROP), null);
+  const message = status && status.message ? String(status.message) : '';
+  if (/script\.external_request|UrlFetchApp\.fetch|permission/i.test(message)) {
+    props.deleteProperty(VIETLOTT_LAST_ERROR_PROP);
+  }
 }
 
 function autoFetchMega645() {
@@ -645,21 +674,7 @@ function notifyVietlottFetchError(type, err) {
     message: message
   };
   PropertiesService.getDocumentProperties().setProperty(VIETLOTT_LAST_ERROR_PROP, JSON.stringify(payload));
-
-  try {
-    const email = Session.getEffectiveUser().getEmail() || Session.getActiveUser().getEmail();
-    if (email && MailApp.getRemainingDailyQuota() > 0) {
-      MailApp.sendEmail({
-        to: email,
-        subject: 'Vietlott auto-match lỗi (' + type + ')',
-        body: 'Không tự lấy được kết quả Vietlott ' + type + '.\n\n'
-          + message + '\n\n'
-          + 'Hãy kiểm tra lại cấu trúc HTML Vietlott hoặc nhập tay kết quả trong web app.'
-      });
-    }
-  } catch (mailErr) {
-    console.warn('Không gửi được email cảnh báo Vietlott:', mailErr);
-  }
+  console.warn('Vietlott auto-fetch lỗi (' + type + '): ' + message);
 }
 
 /* =========================================================================
