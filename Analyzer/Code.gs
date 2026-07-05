@@ -92,6 +92,17 @@ const VIETLOTT_FETCH_HEADERS = {
   'Cache-Control': 'no-cache',
   'Pragma': 'no-cache'
 };
+const VIETLOTT_AJAX = {
+  renderInfo: 'https://vietlott.vn/ajaxpro/Vietlott.Utility.WebEnvironments,Vietlott.Utility.ashx',
+  detail: {
+    '6/45': 'https://vietlott.vn/ajaxpro/Vietlott.PlugIn.WebParts.Game645ResultDetailWebPart,Vietlott.PlugIn.WebParts.ashx',
+    '6/55': 'https://vietlott.vn/ajaxpro/Vietlott.PlugIn.WebParts.Game655ResultDetailWebPart,Vietlott.PlugIn.WebParts.ashx'
+  },
+  method: {
+    '6/45': 'Game645ResultDetailWebPart.ServerSideDrawResult',
+    '6/55': 'Game655ResultDetailWebPart.ServerSideDrawResult'
+  }
+};
 const VIETLOTT_TZ = 'Asia/Ho_Chi_Minh';
 const VIETLOTT_LAST_ERROR_PROP = 'VIETLOTT_LAST_FETCH_ERROR';
 
@@ -588,8 +599,15 @@ function todayInVietlottTimezone() {
 
 function fetchVietlottResult(type) {
   type = normalizeType(type);
-  const urls = buildVietlottFetchUrls(type);
   const errors = [];
+
+  try {
+    return fetchVietlottAjaxResult(type);
+  } catch (ajaxErr) {
+    errors.push('AjaxPro: ' + (ajaxErr && ajaxErr.message ? ajaxErr.message : String(ajaxErr)));
+  }
+
+  const urls = buildVietlottFetchUrls(type);
 
   for (let i = 0; i < urls.length; i++) {
     const url = urls[i];
@@ -617,6 +635,42 @@ function fetchVietlottResult(type) {
     + (blocked ? ' Vietlott có thể đang chặn request từ Google Apps Script; hãy nhập tay kết quả kỳ này nếu cảnh báo tiếp tục lặp lại.' : ''));
 }
 
+function fetchVietlottAjaxResult(type) {
+  const renderInfoResponse = UrlFetchApp.fetch(VIETLOTT_AJAX.renderInfo, getVietlottAjaxOptions(
+    'ServerSideFrontEndCreateRenderInfo',
+    { SiteId: 'main.frontend.vi' },
+    VIETLOTT_URLS[type]
+  ));
+  const renderInfoCode = renderInfoResponse.getResponseCode();
+  if (renderInfoCode < 200 || renderInfoCode >= 300) {
+    throw new Error('render-info HTTP ' + renderInfoCode);
+  }
+  const renderInfoJson = parseJsonSafe(renderInfoResponse.getContentText('UTF-8'), null);
+  const renderInfo = renderInfoJson && renderInfoJson.value;
+  if (!renderInfo) {
+    throw new Error('không đọc được render-info.');
+  }
+
+  const detailResponse = UrlFetchApp.fetch(VIETLOTT_AJAX.detail[type], getVietlottAjaxOptions(
+    'ServerSideDrawResult',
+    { ORenderInfo: renderInfo, Key: '', DrawId: '' },
+    VIETLOTT_URLS[type]
+  ));
+  const detailCode = detailResponse.getResponseCode();
+  if (detailCode < 200 || detailCode >= 300) {
+    throw new Error('draw-result HTTP ' + detailCode);
+  }
+  const detailJson = parseJsonSafe(detailResponse.getContentText('UTF-8'), null);
+  const value = detailJson && detailJson.value;
+  if (!value || value.Error) {
+    throw new Error(value && value.HtmlContent ? value.HtmlContent : 'draw-result trả lỗi.');
+  }
+
+  const html = String(value.RetExtraParam1 || '') + String(value.RetExtraParam2 || '');
+  if (!html) throw new Error('draw-result không có HTML kết quả.');
+  return parseVietlottResultHtml(html, type, 'Vietlott AjaxPro ' + VIETLOTT_AJAX.method[type]);
+}
+
 function buildVietlottFetchUrls(type) {
   const base = (VIETLOTT_URL_ALIASES[type] || [VIETLOTT_URLS[type]]).slice();
   const seen = {};
@@ -633,6 +687,23 @@ function buildVietlottFetchUrls(type) {
     }
   });
   return urls;
+}
+
+function getVietlottAjaxOptions(method, payload, referer) {
+  const headers = Object.assign({}, VIETLOTT_FETCH_HEADERS, {
+    'Accept': '*/*',
+    'Origin': 'https://vietlott.vn',
+    'Referer': referer || 'https://vietlott.vn/',
+    'X-AjaxPro-Method': method
+  });
+  return {
+    method: 'post',
+    muteHttpExceptions: true,
+    followRedirects: true,
+    contentType: 'text/plain; charset=utf-8',
+    payload: JSON.stringify(payload || {}),
+    headers: headers
+  };
 }
 
 function getVietlottFetchOptions(referer) {
