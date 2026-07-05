@@ -73,6 +73,25 @@ const VIETLOTT_URLS = {
   '6/45': 'https://vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/645',
   '6/55': 'https://vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/655.html'
 };
+const VIETLOTT_URL_ALIASES = {
+  '6/45': [
+    'https://vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/645',
+    'https://vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/645.html',
+    'https://www.vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/645'
+  ],
+  '6/55': [
+    'https://vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/655.html',
+    'https://vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/655',
+    'https://www.vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/655.html'
+  ]
+};
+const VIETLOTT_FETCH_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
+  'Cache-Control': 'no-cache',
+  'Pragma': 'no-cache'
+};
 const VIETLOTT_TZ = 'Asia/Ho_Chi_Minh';
 const VIETLOTT_LAST_ERROR_PROP = 'VIETLOTT_LAST_FETCH_ERROR';
 
@@ -491,11 +510,7 @@ function installVietlottAutoFetchTriggers() {
  * - SpreadsheetApp: đọc/ghi sheet hiện tại
  */
 function authorizeVietlottAutoFetch() {
-  UrlFetchApp.fetch(VIETLOTT_URLS['6/45'], {
-    muteHttpExceptions: true,
-    followRedirects: true,
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Google Apps Script Vietlott checker)' }
-  });
+  UrlFetchApp.fetch(VIETLOTT_URLS['6/45'], getVietlottFetchOptions(VIETLOTT_URLS['6/45']));
   ScriptApp.getProjectTriggers();
   SpreadsheetApp.getActiveSpreadsheet().getId();
   clearVietlottPermissionError();
@@ -573,25 +588,66 @@ function todayInVietlottTimezone() {
 
 function fetchVietlottResult(type) {
   type = normalizeType(type);
-  const url = VIETLOTT_URLS[type];
-  const fetchUrl = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'nocatche=' + Date.now();
-  const response = UrlFetchApp.fetch(fetchUrl, {
-    muteHttpExceptions: true,
-    followRedirects: true,
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (compatible; Google Apps Script Vietlott checker)',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
-      'Cache-Control': 'no-cache'
+  const urls = buildVietlottFetchUrls(type);
+  const errors = [];
+
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    try {
+      const response = UrlFetchApp.fetch(url, getVietlottFetchOptions(url));
+      const code = response.getResponseCode();
+      const html = response.getContentText('UTF-8');
+      if (code < 200 || code >= 300) {
+        errors.push(shortenVietlottUrl(url) + ' HTTP ' + code);
+        continue;
+      }
+      try {
+        return parseVietlottResultHtml(html, type, url);
+      } catch (parseErr) {
+        errors.push(shortenVietlottUrl(url) + ' parse: ' + (parseErr && parseErr.message ? parseErr.message : String(parseErr)));
+      }
+    } catch (err) {
+      errors.push(shortenVietlottUrl(url) + ': ' + (err && err.message ? err.message : String(err)));
+    }
+  }
+
+  const detail = errors.join(' | ');
+  const blocked = /HTTP 403/.test(detail);
+  throw new Error('Không tải được Vietlott ' + type + '. ' + detail
+    + (blocked ? ' Vietlott có thể đang chặn request từ Google Apps Script; hãy nhập tay kết quả kỳ này nếu cảnh báo tiếp tục lặp lại.' : ''));
+}
+
+function buildVietlottFetchUrls(type) {
+  const base = (VIETLOTT_URL_ALIASES[type] || [VIETLOTT_URLS[type]]).slice();
+  const seen = {};
+  const urls = [];
+  base.forEach(function (url) {
+    if (!seen[url]) {
+      urls.push(url);
+      seen[url] = true;
+    }
+    const noCacheUrl = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'nocatche=' + Date.now();
+    if (!seen[noCacheUrl]) {
+      urls.push(noCacheUrl);
+      seen[noCacheUrl] = true;
     }
   });
+  return urls;
+}
 
-  const code = response.getResponseCode();
-  const html = response.getContentText('UTF-8');
-  if (code < 200 || code >= 300) {
-    throw new Error('Không tải được Vietlott ' + type + ' (HTTP ' + code + ').');
-  }
-  return parseVietlottResultHtml(html, type, url);
+function getVietlottFetchOptions(referer) {
+  const headers = Object.assign({}, VIETLOTT_FETCH_HEADERS, {
+    'Referer': referer || 'https://vietlott.vn/'
+  });
+  return {
+    muteHttpExceptions: true,
+    followRedirects: true,
+    headers: headers
+  };
+}
+
+function shortenVietlottUrl(url) {
+  return String(url || '').replace(/^https:\/\/(www\.)?vietlott\.vn/, '');
 }
 
 function parseVietlottResultHtml(html, type, sourceUrl) {
