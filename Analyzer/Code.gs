@@ -1334,11 +1334,20 @@ function buildHistoricalSetLookup(draws) {
 function buildStatsWindows(ascResults, cfg) {
   const max = cfg.max;
   const mainCount = cfg.main || 6;
+  const allResults = ascResults;
+  const last50 = ascResults.slice(Math.max(0, ascResults.length - 50));
+  const last20 = ascResults.slice(Math.max(0, ascResults.length - 20));
   const out = {
-    all: computeStats(ascResults, max, mainCount),
-    50: computeStats(ascResults.slice(Math.max(0, ascResults.length - 50)), max, mainCount),
-    20: computeStats(ascResults.slice(Math.max(0, ascResults.length - 20)), max, mainCount)
+    all: computeStats(allResults, max, mainCount),
+    50: computeStats(last50, max, mainCount),
+    20: computeStats(last20, max, mainCount)
   };
+  out.all.pairs = computePairStats(allResults, max, 10);
+  out['50'].pairs = computePairStats(last50, max, 10);
+  out['20'].pairs = computePairStats(last20, max, 10);
+  out.all.special = cfg.hasSpecial ? computeSpecialStats(allResults, max) : null;
+  out['50'].special = cfg.hasSpecial ? computeSpecialStats(last50, max) : null;
+  out['20'].special = cfg.hasSpecial ? computeSpecialStats(last20, max) : null;
   out.all.windowKey = 'all';
   out['50'].windowKey = '50';
   out['20'].windowKey = '20';
@@ -1349,9 +1358,11 @@ function computeStats(ascResults, max, mainCount) {
   mainCount = mainCount || 6;
   const freq = {};
   const lastSeen = {};
+  const positions = {};
   for (let n = 1; n <= max; n++) {
     freq[n] = 0;
     lastSeen[n] = -1;
+    positions[n] = [];
   }
 
   ascResults.forEach(function (draw, idx) {
@@ -1360,6 +1371,7 @@ function computeStats(ascResults, max, mainCount) {
       if (n >= 1 && n <= max) {
         freq[n] += 1;
         lastSeen[n] = idx;
+        positions[n].push(idx);
       }
     });
   });
@@ -1372,6 +1384,7 @@ function computeStats(ascResults, max, mainCount) {
   for (let n = 1; n <= max; n++) {
     const seenAt = lastSeen[n];
     const gap = seenAt < 0 ? totalDraws : Math.max(0, totalDraws - 1 - seenAt);
+    const gapStats = computeGapStats(positions[n], totalDraws, gap);
     const zScoreRaw = sdFreq > 0 ? (freq[n] - expectedFreq) / sdFreq : 0;
     const zScore = Math.round(zScoreRaw * 100) / 100;
     numbers.push({
@@ -1383,6 +1396,9 @@ function computeStats(ascResults, max, mainCount) {
       expected: Math.round(expectedFreq * 100) / 100,
       sd: Math.round(sdFreq * 100) / 100,
       zScore: zScore,
+      avgGap: gapStats.avgGap,
+      maxGap: gapStats.maxGap,
+      gapRatio: gapStats.gapRatio,
       significant: Math.abs(zScoreRaw) > 2,
       signal: zScoreRaw > 2 ? 'hot' : (zScoreRaw < -2 ? 'cold' : 'neutral')
     });
@@ -1394,6 +1410,7 @@ function computeStats(ascResults, max, mainCount) {
   const cold = numbers.slice().sort(function (a, b) {
     return (a.zScore - b.zScore) || (a.freq - b.freq) || (b.gap - a.gap) || (a.n - b.n);
   }).slice(0, mainCount);
+  addTrendToRankedNumbers(hot.concat(cold), ascResults, mainCount);
 
   return {
     totalDraws: totalDraws,
@@ -1404,7 +1421,208 @@ function computeStats(ascResults, max, mainCount) {
     sdFreq: Math.round(sdFreq * 100) / 100,
     numbers: numbers,
     hot: hot,
+    cold: cold,
+    sumHistogram: computeSumHistogram(ascResults, max, mainCount)
+  };
+}
+
+function computeSpecialStats(ascResults, max) {
+  const freq = {};
+  const lastSeen = {};
+  for (let n = 1; n <= max; n++) {
+    freq[n] = 0;
+    lastSeen[n] = -1;
+  }
+
+  let totalDraws = 0;
+  ascResults.forEach(function (draw) {
+    const special = Number(draw.special);
+    if (isNaN(special) || special < 1 || special > max) return;
+    freq[special] += 1;
+    lastSeen[special] = totalDraws;
+    totalDraws += 1;
+  });
+
+  const probability = 1 / max;
+  const expectedFreq = totalDraws * probability;
+  const sdFreq = Math.sqrt(totalDraws * probability * (1 - probability));
+  const numbers = [];
+  for (let n = 1; n <= max; n++) {
+    const seenAt = lastSeen[n];
+    const gap = seenAt < 0 ? totalDraws : Math.max(0, totalDraws - 1 - seenAt);
+    const zScoreRaw = sdFreq > 0 ? (freq[n] - expectedFreq) / sdFreq : 0;
+    numbers.push({
+      n: n,
+      freq: freq[n],
+      pct: totalDraws ? Math.round((freq[n] / totalDraws) * 1000) / 10 : 0,
+      gap: gap,
+      expected: Math.round(expectedFreq * 100) / 100,
+      sd: Math.round(sdFreq * 100) / 100,
+      zScore: Math.round(zScoreRaw * 100) / 100,
+      significant: Math.abs(zScoreRaw) > 2,
+      signal: zScoreRaw > 2 ? 'hot' : (zScoreRaw < -2 ? 'cold' : 'neutral')
+    });
+  }
+
+  const hot = numbers.slice().sort(function (a, b) {
+    return (b.zScore - a.zScore) || (b.freq - a.freq) || (a.gap - b.gap) || (a.n - b.n);
+  }).slice(0, 6);
+  const cold = numbers.slice().sort(function (a, b) {
+    return (a.zScore - b.zScore) || (a.freq - b.freq) || (b.gap - a.gap) || (a.n - b.n);
+  }).slice(0, 6);
+
+  return {
+    totalDraws: totalDraws,
+    max: max,
+    probability: probability,
+    expectedFreq: Math.round(expectedFreq * 100) / 100,
+    sdFreq: Math.round(sdFreq * 100) / 100,
+    numbers: numbers,
+    hot: hot,
     cold: cold
+  };
+}
+
+function computePairStats(ascResults, max, topN) {
+  topN = topN || 10;
+  const pairFreq = {};
+  const lastSeen = {};
+  for (let a = 1; a <= max; a++) {
+    for (let b = a + 1; b <= max; b++) {
+      const key = a + '-' + b;
+      pairFreq[key] = 0;
+      lastSeen[key] = -1;
+    }
+  }
+
+  let totalDraws = 0;
+  ascResults.forEach(function (draw) {
+    const nums = (draw.numbers || []).slice(0, 6).map(Number).filter(function (n) {
+      return !isNaN(n) && n >= 1 && n <= max;
+    }).sort(numberAsc);
+    if (nums.length < 6) return;
+    for (let i = 0; i < nums.length; i++) {
+      for (let j = i + 1; j < nums.length; j++) {
+        const key = nums[i] + '-' + nums[j];
+        pairFreq[key] += 1;
+        lastSeen[key] = totalDraws;
+      }
+    }
+    totalDraws += 1;
+  });
+
+  const probability = (6 * 5) / (max * (max - 1));
+  const expected = totalDraws * probability;
+  const topPairs = Object.keys(pairFreq).filter(function (key) {
+    return pairFreq[key] > 0;
+  }).map(function (key) {
+    const parts = key.split('-').map(Number);
+    return {
+      a: parts[0],
+      b: parts[1],
+      freq: pairFreq[key],
+      lastSeenGap: lastSeen[key] < 0 ? totalDraws : Math.max(0, totalDraws - 1 - lastSeen[key])
+    };
+  }).sort(function (a, b) {
+    return (b.freq - a.freq) || (a.lastSeenGap - b.lastSeenGap) || (a.a - b.a) || (a.b - b.b);
+  }).slice(0, topN);
+
+  return {
+    totalDraws: totalDraws,
+    expected: Math.round(expected * 100) / 100,
+    probability: probability,
+    topPairs: topPairs
+  };
+}
+
+function computeGapStats(pos, totalDraws, currentGap) {
+  pos = pos || [];
+  if (!pos.length) {
+    return { avgGap: null, maxGap: totalDraws, gapRatio: null };
+  }
+
+  const gaps = [pos[0]];
+  for (let i = 1; i < pos.length; i++) {
+    gaps.push(Math.max(0, pos[i] - pos[i - 1] - 1));
+  }
+  gaps.push(currentGap);
+  const maxGap = gaps.reduce(function (m, n) { return Math.max(m, n); }, 0);
+
+  let avgGap = null;
+  if (pos.length >= 2) {
+    const between = [];
+    for (let i = 1; i < pos.length; i++) {
+      between.push(Math.max(0, pos[i] - pos[i - 1] - 1));
+    }
+    avgGap = Math.round(average(between) * 10) / 10;
+  }
+
+  const gapRatio = avgGap && avgGap > 0
+    ? Math.round((currentGap / avgGap) * 10) / 10
+    : null;
+
+  return { avgGap: avgGap, maxGap: maxGap, gapRatio: gapRatio };
+}
+
+function addTrendToRankedNumbers(items, ascResults, mainCount) {
+  const byNumber = {};
+  (items || []).forEach(function (it) {
+    if (it && !byNumber[it.n]) byNumber[it.n] = it;
+  });
+  const tracked = Object.keys(byNumber).map(Number);
+  if (!tracked.length) return;
+
+  const total = ascResults.length;
+  const segmentSize = Math.max(1, Math.ceil(total / 12));
+  const trends = {};
+  tracked.forEach(function (n) { trends[n] = []; });
+
+  for (let start = 0; start < total; start += segmentSize) {
+    const counts = {};
+    tracked.forEach(function (n) { counts[n] = 0; });
+    ascResults.slice(start, start + segmentSize).forEach(function (draw) {
+      const seen = {};
+      (draw.numbers || []).slice(0, mainCount).forEach(function (n) {
+        n = Number(n);
+        if (byNumber[n] && !seen[n]) {
+          counts[n] += 1;
+          seen[n] = true;
+        }
+      });
+    });
+    tracked.forEach(function (n) { trends[n].push(counts[n]); });
+  }
+
+  tracked.forEach(function (n) {
+    byNumber[n].trend = trends[n] || [];
+    byNumber[n].trendSegmentSize = segmentSize;
+  });
+}
+
+function computeSumHistogram(ascResults, max, mainCount) {
+  mainCount = mainCount || 6;
+  const minSum = mainCount * (mainCount + 1) / 2;
+  const maxSum = mainCount * (2 * max - mainCount + 1) / 2;
+  const binSize = 20;
+  const bins = [];
+  for (let from = minSum; from <= maxSum; from += binSize) {
+    bins.push({ from: from, to: Math.min(maxSum, from + binSize - 1), count: 0 });
+  }
+
+  ascResults.forEach(function (draw) {
+    const nums = (draw.numbers || []).slice(0, mainCount).map(Number);
+    if (nums.length < mainCount || nums.some(isNaN)) return;
+    const sum = nums.reduce(function (s, n) { return s + n; }, 0);
+    const idx = Math.max(0, Math.min(bins.length - 1, Math.floor((sum - minSum) / binSize)));
+    bins[idx].count += 1;
+  });
+
+  const expectedMean = mainCount * (max + 1) / 2;
+  const variance = mainCount * (max * max - 1) / 12 * (max - mainCount) / (max - 1);
+  return {
+    bins: bins,
+    expectedMean: Math.round(expectedMean * 10) / 10,
+    expectedSd: Math.round(Math.sqrt(variance) * 10) / 10
   };
 }
 
