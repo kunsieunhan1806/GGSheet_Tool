@@ -73,6 +73,40 @@ const VIETLOTT_URLS = {
   '6/45': 'https://vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/645',
   '6/55': 'https://vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/655.html'
 };
+const VIETLOTT_URL_ALIASES = {
+  '6/45': [
+    'https://vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/645',
+    'https://vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/645.html',
+    'https://www.vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/645'
+  ],
+  '6/55': [
+    'https://vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/655.html',
+    'https://vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/655',
+    'https://www.vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/655.html'
+  ]
+};
+const VIETLOTT_FETCH_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
+  'Cache-Control': 'no-cache',
+  'Pragma': 'no-cache'
+};
+const VIETLOTT_AJAX = {
+  renderInfo: 'https://vietlott.vn/ajaxpro/Vietlott.Utility.WebEnvironments,Vietlott.Utility.ashx',
+  detail: {
+    '6/45': 'https://vietlott.vn/ajaxpro/Vietlott.PlugIn.WebParts.Game645ResultDetailWebPart,Vietlott.PlugIn.WebParts.ashx',
+    '6/55': 'https://vietlott.vn/ajaxpro/Vietlott.PlugIn.WebParts.Game655ResultDetailWebPart,Vietlott.PlugIn.WebParts.ashx'
+  },
+  method: {
+    '6/45': 'Game645ResultDetailWebPart.ServerSideDrawResult',
+    '6/55': 'Game655ResultDetailWebPart.ServerSideDrawResult'
+  }
+};
+const RESULT_FALLBACK_URLS = {
+  '6/45': 'https://www.minhngoc.net.vn/ket-qua-xo-so/dien-toan-vietlott/mega-6x45.html',
+  '6/55': 'https://www.minhngoc.net.vn/ket-qua-xo-so/dien-toan-vietlott/power-6x55.html'
+};
 const VIETLOTT_TZ = 'Asia/Ho_Chi_Minh';
 const VIETLOTT_LAST_ERROR_PROP = 'VIETLOTT_LAST_FETCH_ERROR';
 
@@ -464,9 +498,11 @@ function saveJackpot(payload) {
 
 /**
  * Cài trigger tự lấy kết quả Vietlott sau giờ quay.
- * Chạy hàm này một lần trong Apps Script editor để cấp quyền UrlFetchApp/ScriptApp/MailApp.
+ * Chạy hàm này một lần trong Apps Script editor để cấp quyền UrlFetchApp/ScriptApp.
  */
 function installVietlottAutoFetchTriggers() {
+  authorizeVietlottAutoFetch();
+
   const handlers = ['autoFetchMega645', 'autoFetchPower655'];
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
     if (handlers.indexOf(trigger.getHandlerFunction()) >= 0) {
@@ -480,6 +516,29 @@ function installVietlottAutoFetchTriggers() {
     .forEach(function (day) { createVietlottWeeklyTrigger('autoFetchPower655', day); });
 
   return 'Đã cài trigger Vietlott: Mega 6/45 (T4, T6, CN) và Power 6/55 (T3, T5, T7), khoảng 19:10.';
+}
+
+/**
+ * Chạy một lần sau khi deploy/cập nhật code để Apps Script hỏi đủ quyền:
+ * - UrlFetchApp: lấy kết quả Vietlott
+ * - ScriptApp: tạo time-driven trigger
+ * - SpreadsheetApp: đọc/ghi sheet hiện tại
+ */
+function authorizeVietlottAutoFetch() {
+  UrlFetchApp.fetch(VIETLOTT_URLS['6/45'], getVietlottFetchOptions(VIETLOTT_URLS['6/45']));
+  ScriptApp.getProjectTriggers();
+  SpreadsheetApp.getActiveSpreadsheet().getId();
+  clearVietlottPermissionError();
+  return 'Đã yêu cầu/cấp đủ quyền cho Vietlott auto-fetch.';
+}
+
+function clearVietlottPermissionError() {
+  const props = PropertiesService.getDocumentProperties();
+  const status = parseJsonSafe(props.getProperty(VIETLOTT_LAST_ERROR_PROP), null);
+  const message = status && status.message ? String(status.message) : '';
+  if (/script\.external_request|UrlFetchApp\.fetch|permission/i.test(message)) {
+    props.deleteProperty(VIETLOTT_LAST_ERROR_PROP);
+  }
 }
 
 function autoFetchMega645() {
@@ -544,25 +603,221 @@ function todayInVietlottTimezone() {
 
 function fetchVietlottResult(type) {
   type = normalizeType(type);
-  const url = VIETLOTT_URLS[type];
-  const fetchUrl = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'nocatche=' + Date.now();
-  const response = UrlFetchApp.fetch(fetchUrl, {
-    muteHttpExceptions: true,
-    followRedirects: true,
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (compatible; Google Apps Script Vietlott checker)',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
-      'Cache-Control': 'no-cache'
+  const errors = [];
+
+  try {
+    return fetchVietlottAjaxResult(type);
+  } catch (ajaxErr) {
+    errors.push('AjaxPro: ' + (ajaxErr && ajaxErr.message ? ajaxErr.message : String(ajaxErr)));
+  }
+
+  const urls = buildVietlottFetchUrls(type);
+
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    try {
+      const response = UrlFetchApp.fetch(url, getVietlottFetchOptions(url));
+      const code = response.getResponseCode();
+      const html = response.getContentText('UTF-8');
+      if (code < 200 || code >= 300) {
+        errors.push(shortenVietlottUrl(url) + ' HTTP ' + code);
+        continue;
+      }
+      try {
+        return parseVietlottResultHtml(html, type, url);
+      } catch (parseErr) {
+        errors.push(shortenVietlottUrl(url) + ' parse: ' + (parseErr && parseErr.message ? parseErr.message : String(parseErr)));
+      }
+    } catch (err) {
+      errors.push(shortenVietlottUrl(url) + ': ' + (err && err.message ? err.message : String(err)));
+    }
+  }
+
+  try {
+    return fetchFallbackResult(type);
+  } catch (fallbackErr) {
+    errors.push('MinhNgoc fallback: ' + (fallbackErr && fallbackErr.message ? fallbackErr.message : String(fallbackErr)));
+  }
+
+  const detail = errors.join(' | ');
+  const blocked = /HTTP 403/.test(detail);
+  throw new Error('Không tải được Vietlott ' + type + '. ' + detail
+    + (blocked ? ' Vietlott có thể đang chặn request từ Google Apps Script; fallback cũng chưa lấy được dữ liệu mới. Hãy nhập tay kết quả kỳ này nếu cảnh báo tiếp tục lặp lại.' : ''));
+}
+
+function fetchVietlottAjaxResult(type) {
+  const renderInfoResponse = UrlFetchApp.fetch(VIETLOTT_AJAX.renderInfo, getVietlottAjaxOptions(
+    'ServerSideFrontEndCreateRenderInfo',
+    { SiteId: 'main.frontend.vi' },
+    VIETLOTT_URLS[type]
+  ));
+  const renderInfoCode = renderInfoResponse.getResponseCode();
+  if (renderInfoCode < 200 || renderInfoCode >= 300) {
+    throw new Error('render-info HTTP ' + renderInfoCode);
+  }
+  const renderInfoJson = parseJsonSafe(renderInfoResponse.getContentText('UTF-8'), null);
+  const renderInfo = renderInfoJson && renderInfoJson.value;
+  if (!renderInfo) {
+    throw new Error('không đọc được render-info.');
+  }
+
+  const detailResponse = UrlFetchApp.fetch(VIETLOTT_AJAX.detail[type], getVietlottAjaxOptions(
+    'ServerSideDrawResult',
+    { ORenderInfo: renderInfo, Key: '', DrawId: '' },
+    VIETLOTT_URLS[type]
+  ));
+  const detailCode = detailResponse.getResponseCode();
+  if (detailCode < 200 || detailCode >= 300) {
+    throw new Error('draw-result HTTP ' + detailCode);
+  }
+  const detailJson = parseJsonSafe(detailResponse.getContentText('UTF-8'), null);
+  const value = detailJson && detailJson.value;
+  if (!value || value.Error) {
+    throw new Error(value && value.HtmlContent ? value.HtmlContent : 'draw-result trả lỗi.');
+  }
+
+  const html = String(value.RetExtraParam1 || '') + String(value.RetExtraParam2 || '');
+  if (!html) throw new Error('draw-result không có HTML kết quả.');
+  return parseVietlottResultHtml(html, type, 'Vietlott AjaxPro ' + VIETLOTT_AJAX.method[type]);
+}
+
+function buildVietlottFetchUrls(type) {
+  const base = (VIETLOTT_URL_ALIASES[type] || [VIETLOTT_URLS[type]]).slice();
+  const seen = {};
+  const urls = [];
+  base.forEach(function (url) {
+    if (!seen[url]) {
+      urls.push(url);
+      seen[url] = true;
+    }
+    const noCacheUrl = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'nocatche=' + Date.now();
+    if (!seen[noCacheUrl]) {
+      urls.push(noCacheUrl);
+      seen[noCacheUrl] = true;
     }
   });
+  return urls;
+}
 
+function getVietlottAjaxOptions(method, payload, referer) {
+  const headers = Object.assign({}, VIETLOTT_FETCH_HEADERS, {
+    'Accept': '*/*',
+    'Origin': 'https://vietlott.vn',
+    'Referer': referer || 'https://vietlott.vn/',
+    'X-AjaxPro-Method': method
+  });
+  return {
+    method: 'post',
+    muteHttpExceptions: true,
+    followRedirects: true,
+    contentType: 'text/plain; charset=utf-8',
+    payload: JSON.stringify(payload || {}),
+    headers: headers
+  };
+}
+
+function getVietlottFetchOptions(referer) {
+  const headers = Object.assign({}, VIETLOTT_FETCH_HEADERS, {
+    'Referer': referer || 'https://vietlott.vn/'
+  });
+  return {
+    muteHttpExceptions: true,
+    followRedirects: true,
+    headers: headers
+  };
+}
+
+function shortenVietlottUrl(url) {
+  return String(url || '').replace(/^https:\/\/(www\.)?vietlott\.vn/, '');
+}
+
+function fetchFallbackResult(type) {
+  const url = RESULT_FALLBACK_URLS[type];
+  if (!url) throw new Error('không có nguồn fallback cho ' + type + '.');
+
+  const response = UrlFetchApp.fetch(url, getVietlottFetchOptions(url));
   const code = response.getResponseCode();
   const html = response.getContentText('UTF-8');
   if (code < 200 || code >= 300) {
-    throw new Error('Không tải được Vietlott ' + type + ' (HTTP ' + code + ').');
+    throw new Error('HTTP ' + code + ' từ ' + url);
   }
-  return parseVietlottResultHtml(html, type, url);
+  return parseMinhNgocResultHtml(html, type, url);
+}
+
+function parseMinhNgocResultHtml(html, type, sourceUrl) {
+  const cfg = TYPES[type];
+  if (!html) throw new Error('HTML Minh Ngọc rỗng.');
+
+  const text = normalizeTextForSearch(stripHtmlToText(html));
+  const drawMatch = html.match(/<span\b[^>]*id=["'][^"']*KY_VE[^"']*["'][^>]*>\s*#?([0-9]+)\s*<\/span>/i)
+    || text.match(/ky\s+ve\s*:?\s*#?([0-9]+)/i);
+  const dateMatch = text.match(/ngay\s+quay\s+thuong\s*(\d{2}\/\d{2}\/\d{4})/i)
+    || text.match(/(\d{2}\/\d{2}\/\d{4})/);
+  if (!dateMatch) {
+    throw new Error('Không tìm thấy ngày quay trong HTML Minh Ngọc.');
+  }
+
+  const date = parseVnDate(dateMatch[1]);
+  if (!date) throw new Error('Ngày quay Minh Ngọc không hợp lệ: ' + dateMatch[1]);
+
+  const blockMatch = html.match(/<ul\b[^>]*class=["'][^"']*\bresult-number\b[^"']*["'][^>]*>([\s\S]*?)<\/ul>/i);
+  const block = blockMatch ? blockMatch[1] : html;
+  const numbers = [];
+  const numberRe = /<div\b[^>]*class=["'][^"']*\bfinnish\d+\b[^"']*["'][^>]*>\s*(\d{1,2})\s*<\/div>/gi;
+  let m;
+  while ((m = numberRe.exec(block)) !== null) {
+    numbers.push(parseInt(m[1], 10));
+  }
+
+  const expected = cfg.hasSpecial ? 7 : 6;
+  if (numbers.length < expected) {
+    throw new Error('Không đọc đủ bộ số Minh Ngọc ' + type + ' từ HTML (đọc được ' + numbers.length + '/' + expected + ').');
+  }
+
+  const mainNumbers = sanitizeNumbers(numbers.slice(0, 6), cfg.max, cfg.main || 6);
+  const special = cfg.hasSpecial ? sanitizeSpecial(numbers[6], cfg.max, mainNumbers) : null;
+  const drawId = drawMatch ? String(drawMatch[1] || '').trim() : '';
+  return {
+    date: toIso(date),
+    type: type,
+    numbers: mainNumbers,
+    special: special,
+    notes: drawId ? ('Kỳ #' + drawId + ' từ Minh Ngọc') : 'Từ Minh Ngọc'
+  };
+}
+
+function stripHtmlToText(html) {
+  return decodeHtmlEntities(String(html || '').replace(/<[^>]+>/g, ' '))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeTextForSearch(value) {
+  const text = String(value || '');
+  return (typeof text.normalize === 'function' ? text.normalize('NFD').replace(/[\u0300-\u036f]/g, '') : text)
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D');
+}
+
+function decodeHtmlEntities(value) {
+  return String(value || '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&agrave;/gi, 'à')
+    .replace(/&aacute;/gi, 'á')
+    .replace(/&eacute;/gi, 'é')
+    .replace(/&iacute;/gi, 'í')
+    .replace(/&oacute;/gi, 'ó')
+    .replace(/&uacute;/gi, 'ú')
+    .replace(/&yacute;/gi, 'ý')
+    .replace(/&#(\d+);/g, function (_, code) {
+      return String.fromCharCode(parseInt(code, 10));
+    })
+    .replace(/&#x([0-9a-f]+);/gi, function (_, code) {
+      return String.fromCharCode(parseInt(code, 16));
+    });
 }
 
 function parseVietlottResultHtml(html, type, sourceUrl) {
@@ -645,21 +900,7 @@ function notifyVietlottFetchError(type, err) {
     message: message
   };
   PropertiesService.getDocumentProperties().setProperty(VIETLOTT_LAST_ERROR_PROP, JSON.stringify(payload));
-
-  try {
-    const email = Session.getEffectiveUser().getEmail() || Session.getActiveUser().getEmail();
-    if (email && MailApp.getRemainingDailyQuota() > 0) {
-      MailApp.sendEmail({
-        to: email,
-        subject: 'Vietlott auto-match lỗi (' + type + ')',
-        body: 'Không tự lấy được kết quả Vietlott ' + type + '.\n\n'
-          + message + '\n\n'
-          + 'Hãy kiểm tra lại cấu trúc HTML Vietlott hoặc nhập tay kết quả trong web app.'
-      });
-    }
-  } catch (mailErr) {
-    console.warn('Không gửi được email cảnh báo Vietlott:', mailErr);
-  }
+  console.warn('Vietlott auto-fetch lỗi (' + type + '): ' + message);
 }
 
 /* =========================================================================
