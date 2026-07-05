@@ -782,7 +782,7 @@ function parseMinhNgocResultHtml(html, type, sourceUrl) {
     type: type,
     numbers: mainNumbers,
     special: special,
-    notes: 'Tự lấy từ Minh Ngọc fallback' + (drawId ? ' kỳ #' + drawId : '') + ' - ' + sourceUrl
+    notes: drawId ? ('Kỳ #' + drawId + ' từ Minh Ngọc') : 'Từ Minh Ngọc'
   };
 }
 
