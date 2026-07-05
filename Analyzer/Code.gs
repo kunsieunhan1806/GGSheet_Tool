@@ -103,6 +103,10 @@ const VIETLOTT_AJAX = {
     '6/55': 'Game655ResultDetailWebPart.ServerSideDrawResult'
   }
 };
+const RESULT_FALLBACK_URLS = {
+  '6/45': 'https://www.minhngoc.net.vn/ket-qua-xo-so/dien-toan-vietlott/mega-6x45.html',
+  '6/55': 'https://www.minhngoc.net.vn/ket-qua-xo-so/dien-toan-vietlott/power-6x55.html'
+};
 const VIETLOTT_TZ = 'Asia/Ho_Chi_Minh';
 const VIETLOTT_LAST_ERROR_PROP = 'VIETLOTT_LAST_FETCH_ERROR';
 
@@ -629,10 +633,16 @@ function fetchVietlottResult(type) {
     }
   }
 
+  try {
+    return fetchFallbackResult(type);
+  } catch (fallbackErr) {
+    errors.push('MinhNgoc fallback: ' + (fallbackErr && fallbackErr.message ? fallbackErr.message : String(fallbackErr)));
+  }
+
   const detail = errors.join(' | ');
   const blocked = /HTTP 403/.test(detail);
   throw new Error('Không tải được Vietlott ' + type + '. ' + detail
-    + (blocked ? ' Vietlott có thể đang chặn request từ Google Apps Script; hãy nhập tay kết quả kỳ này nếu cảnh báo tiếp tục lặp lại.' : ''));
+    + (blocked ? ' Vietlott có thể đang chặn request từ Google Apps Script; fallback cũng chưa lấy được dữ liệu mới. Hãy nhập tay kết quả kỳ này nếu cảnh báo tiếp tục lặp lại.' : ''));
 }
 
 function fetchVietlottAjaxResult(type) {
@@ -719,6 +729,95 @@ function getVietlottFetchOptions(referer) {
 
 function shortenVietlottUrl(url) {
   return String(url || '').replace(/^https:\/\/(www\.)?vietlott\.vn/, '');
+}
+
+function fetchFallbackResult(type) {
+  const url = RESULT_FALLBACK_URLS[type];
+  if (!url) throw new Error('không có nguồn fallback cho ' + type + '.');
+
+  const response = UrlFetchApp.fetch(url, getVietlottFetchOptions(url));
+  const code = response.getResponseCode();
+  const html = response.getContentText('UTF-8');
+  if (code < 200 || code >= 300) {
+    throw new Error('HTTP ' + code + ' từ ' + url);
+  }
+  return parseMinhNgocResultHtml(html, type, url);
+}
+
+function parseMinhNgocResultHtml(html, type, sourceUrl) {
+  const cfg = TYPES[type];
+  if (!html) throw new Error('HTML Minh Ngọc rỗng.');
+
+  const text = normalizeTextForSearch(stripHtmlToText(html));
+  const drawMatch = html.match(/<span\b[^>]*id=["'][^"']*KY_VE[^"']*["'][^>]*>\s*#?([0-9]+)\s*<\/span>/i)
+    || text.match(/ky\s+ve\s*:?\s*#?([0-9]+)/i);
+  const dateMatch = text.match(/ngay\s+quay\s+thuong\s*(\d{2}\/\d{2}\/\d{4})/i)
+    || text.match(/(\d{2}\/\d{2}\/\d{4})/);
+  if (!dateMatch) {
+    throw new Error('Không tìm thấy ngày quay trong HTML Minh Ngọc.');
+  }
+
+  const date = parseVnDate(dateMatch[1]);
+  if (!date) throw new Error('Ngày quay Minh Ngọc không hợp lệ: ' + dateMatch[1]);
+
+  const blockMatch = html.match(/<ul\b[^>]*class=["'][^"']*\bresult-number\b[^"']*["'][^>]*>([\s\S]*?)<\/ul>/i);
+  const block = blockMatch ? blockMatch[1] : html;
+  const numbers = [];
+  const numberRe = /<div\b[^>]*class=["'][^"']*\bfinnish\d+\b[^"']*["'][^>]*>\s*(\d{1,2})\s*<\/div>/gi;
+  let m;
+  while ((m = numberRe.exec(block)) !== null) {
+    numbers.push(parseInt(m[1], 10));
+  }
+
+  const expected = cfg.hasSpecial ? 7 : 6;
+  if (numbers.length < expected) {
+    throw new Error('Không đọc đủ bộ số Minh Ngọc ' + type + ' từ HTML (đọc được ' + numbers.length + '/' + expected + ').');
+  }
+
+  const mainNumbers = sanitizeNumbers(numbers.slice(0, 6), cfg.max, cfg.main || 6);
+  const special = cfg.hasSpecial ? sanitizeSpecial(numbers[6], cfg.max, mainNumbers) : null;
+  const drawId = drawMatch ? String(drawMatch[1] || '').trim() : '';
+  return {
+    date: toIso(date),
+    type: type,
+    numbers: mainNumbers,
+    special: special,
+    notes: 'Tự lấy từ Minh Ngọc fallback' + (drawId ? ' kỳ #' + drawId : '') + ' - ' + sourceUrl
+  };
+}
+
+function stripHtmlToText(html) {
+  return decodeHtmlEntities(String(html || '').replace(/<[^>]+>/g, ' '))
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeTextForSearch(value) {
+  const text = String(value || '');
+  return (typeof text.normalize === 'function' ? text.normalize('NFD').replace(/[\u0300-\u036f]/g, '') : text)
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D');
+}
+
+function decodeHtmlEntities(value) {
+  return String(value || '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&agrave;/gi, 'à')
+    .replace(/&aacute;/gi, 'á')
+    .replace(/&eacute;/gi, 'é')
+    .replace(/&iacute;/gi, 'í')
+    .replace(/&oacute;/gi, 'ó')
+    .replace(/&uacute;/gi, 'ú')
+    .replace(/&yacute;/gi, 'ý')
+    .replace(/&#(\d+);/g, function (_, code) {
+      return String.fromCharCode(parseInt(code, 10));
+    })
+    .replace(/&#x([0-9a-f]+);/gi, function (_, code) {
+      return String.fromCharCode(parseInt(code, 16));
+    });
 }
 
 function parseVietlottResultHtml(html, type, sourceUrl) {
