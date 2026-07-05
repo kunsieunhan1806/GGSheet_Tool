@@ -498,9 +498,13 @@
     $('#s-hot').textContent   = s.hot.length  ? signalMarker(s.hot[0]) + pad2(s.hot[0].n)  : '—';
     $('#s-cold').textContent  = s.cold.length ? signalMarker(s.cold[0]) + pad2(s.cold[0].n) : '—';
     renderZNote(s);
-    renderRank('#rank-hot',  s.hot,  it => signalMarker(it) + it.freq + ' lần · z=' + signed(it.zScore));
-    renderRank('#rank-cold', s.cold, it => signalMarker(it) + it.freq + ' lần · z=' + signed(it.zScore));
+    renderRank('#rank-hot',  s.hot,  it => signalMarker(it) + it.freq + ' lần · z=' + signed(it.zScore), { sparkColor: '#d62f44' });
+    renderRank('#rank-cold', s.cold, it => signalMarker(it) + it.freq + ' lần · z=' + signed(it.zScore), { sparkColor: '#4a7dff' });
     renderHeat(s);
+    renderSpecialStats(s);
+    renderPairs(s);
+    renderSumDistribution(s);
+    renderDryStreak(s);
     renderOdds();
   }
 
@@ -526,30 +530,187 @@
       + '</b> số cao rõ và <b>' + coldCount + '</b> số thấp rõ.';
   }
 
-  function renderRank(sel, items, labelFn) {
+  function renderRank(sel, items, labelFn, opts) {
+    opts = opts || {};
     const row = $(sel); row.innerHTML = '';
     items.forEach(it => {
       const wrap = document.createElement('div');
       wrap.className = 'rank-item';
-      wrap.appendChild(statBall(it, false));
+      wrap.appendChild(opts.ballSpecial ? ball(it.n, false, true) : statBall(it, false));
       const small = document.createElement('small');
       small.textContent = labelFn(it);
+      if (opts.sparkColor && it.trend && it.trend.length) {
+        small.insertAdjacentHTML('beforeend', buildSparkline(it.trend, opts.sparkColor, it.trendSegmentSize));
+      }
       wrap.appendChild(small); row.appendChild(wrap);
     });
   }
 
   function renderHeat(s) {
-    const grid = $('#heat-grid'); grid.innerHTML = '';
-    s.numbers.forEach(it => {
+    renderHeatGrid($('#heat-grid'), s.numbers || []);
+  }
+
+  function renderHeatGrid(grid, numbers, opts) {
+    opts = opts || {};
+    if (!grid) return;
+    grid.innerHTML = '';
+    (numbers || []).forEach(it => {
       const cell = document.createElement('div');
-      cell.className = 'heat-cell ' + signalClass(it);
+      cell.className = 'heat-cell ' + signalClass(it) + (opts.special ? ' heat-special' : '');
       cell.style.background = heatColor(it.zScore);
       cell.style.color = Math.abs(Number(it.zScore) || 0) > 2 ? '#fff' : '';
       cell.innerHTML = '<span>' + pad2(it.n) + '</span><small>z ' + signed(it.zScore, 1) + '</small>';
-      cell.title = 'Số ' + pad2(it.n) + ' - ra ' + it.freq + ' lần (' + it.pct
-        + '%), kỳ vọng ' + it.expected + ', sd ' + it.sd + ', z=' + signed(it.zScore)
-        + '; ' + (it.gap === 0 ? 'vừa ra kỳ gần nhất' : 'khô ' + it.gap + ' kỳ');
+      cell.title = buildHeatTitle(it, opts.special);
       grid.appendChild(cell);
+    });
+  }
+
+  function buildHeatTitle(it, special) {
+    let text = (special ? 'Số ĐB ' : 'Số ') + pad2(it.n) + ' - ra ' + it.freq + ' lần (' + it.pct
+      + '%), kỳ vọng ' + it.expected + ', sd ' + it.sd + ', z=' + signed(it.zScore)
+      + '; ' + (it.gap === 0 ? 'vừa ra kỳ gần nhất' : 'khô ' + it.gap + ' kỳ');
+    if (!special && it.avgGap !== null && it.avgGap !== undefined) {
+      text += '; gap TB ' + Number(it.avgGap).toFixed(1)
+        + ', dài nhất ' + it.maxGap
+        + ', hiện tại gấp ' + (it.gapRatio !== null && it.gapRatio !== undefined ? Number(it.gapRatio).toFixed(1) : '—') + '× TB';
+    }
+    return text;
+  }
+
+  function buildSparkline(trend, color, segmentSize) {
+    const values = (trend || []).map(n => Number(n) || 0);
+    if (!values.length) return '';
+    const w = 72, h = 20, pad = 2;
+    const max = Math.max(1, ...values);
+    const innerW = w - pad * 2, innerH = h - pad * 2;
+    const points = values.map((v, i) => {
+      const x = values.length === 1 ? w / 2 : pad + i * innerW / (values.length - 1);
+      const y = h - pad - (v / max) * innerH;
+      return x.toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+    const title = 'Tần suất theo từng đoạn ' + (segmentSize || 1) + ' kỳ: ' + values.join(', ');
+    return '<svg class="sparkline" viewBox="0 0 ' + w + ' ' + h + '" role="img" aria-label="' + escapeHtml(title) + '">'
+      + '<title>' + escapeHtml(title) + '</title>'
+      + '<polyline points="' + points + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.75"></polyline>'
+      + '</svg>';
+  }
+
+  function renderSpecialStats(s) {
+    const card = $('#card-special-stats');
+    if (!card) return;
+    const sp = s && s.special;
+    const show = is655() && sp && sp.totalDraws > 0;
+    card.classList.toggle('hidden', !show);
+    if (!show) return;
+
+    $('#special-note').textContent = 'Số ĐB quay riêng sau 6 số chính — kỳ vọng mỗi số ≈ '
+      + sp.expectedFreq + ' lần. Đang tính ' + sp.totalDraws + '/' + s.totalDraws + ' kỳ có số ĐB.';
+    renderRank('#rank-special-hot', sp.hot || [], it => it.freq + ' lần · z=' + signed(it.zScore) + ' · khô ' + it.gap + ' kỳ', { ballSpecial: true });
+    renderRank('#rank-special-cold', sp.cold || [], it => it.freq + ' lần · z=' + signed(it.zScore) + ' · khô ' + it.gap + ' kỳ', { ballSpecial: true });
+    renderHeatGrid($('#heat-grid-special'), sp.numbers || [], { special: true });
+  }
+
+  function renderPairs(s) {
+    const list = $('#pair-list'), warn = $('#pairs-warn');
+    if (!list || !warn) return;
+    const pairStats = s && s.pairs;
+    list.innerHTML = '';
+    const total = pairStats ? pairStats.totalDraws : 0;
+    warn.classList.toggle('hidden', !(total > 0 && total < 30));
+    if (total > 0 && total < 30) {
+      warn.textContent = 'Dữ liệu còn ít (' + total + ' kỳ) — tần suất cặp chưa có ý nghĩa thống kê, chỉ xem cho vui.';
+    }
+    if (!pairStats || !pairStats.topPairs || !pairStats.topPairs.length) {
+      list.innerHTML = '<p class="empty-inline">Chưa có dữ liệu cặp số.</p>';
+      return;
+    }
+    pairStats.topPairs.forEach(pair => {
+      const row = document.createElement('div');
+      row.className = 'pair-row';
+      const balls = document.createElement('div');
+      balls.className = 'pair-balls';
+      balls.appendChild(ball(pair.a, true));
+      const plus = document.createElement('span');
+      plus.className = 'pair-plus'; plus.textContent = '+';
+      balls.appendChild(plus);
+      balls.appendChild(ball(pair.b, true));
+      row.appendChild(balls);
+      const text = document.createElement('div');
+      text.className = 'pair-text';
+      text.textContent = pair.freq + ' lần cùng ra · kỳ vọng ' + Number(pairStats.expected).toFixed(2)
+        + ' · khô ' + pair.lastSeenGap + ' kỳ';
+      row.appendChild(text);
+      if (pair.freq >= pairStats.expected * 2 && pair.freq >= 3) {
+        const badge = document.createElement('span');
+        badge.className = 'pair-badge';
+        badge.textContent = 'nổi bật';
+        row.appendChild(badge);
+      }
+      list.appendChild(row);
+    });
+  }
+
+  function renderSumDistribution(s) {
+    const el = $('#sum-chart');
+    if (!el) return;
+    el.innerHTML = buildSumDistributionSvg(s && s.sumHistogram);
+  }
+
+  function buildSumDistributionSvg(hist) {
+    if (!hist || !hist.bins || !hist.bins.length) return '<p class="empty-inline">Chưa có dữ liệu tổng.</p>';
+    const bins = hist.bins;
+    const w = 720, h = 180, top = 12, bottom = 30, left = 18, right = 14;
+    const plotW = w - left - right, plotH = h - top - bottom;
+    const maxCount = Math.max(1, ...bins.map(b => Number(b.count) || 0));
+    const minX = bins[0].from, maxX = bins[bins.length - 1].to;
+    const mean = Number(hist.expectedMean) || 0;
+    const meanX = left + ((mean - minX) / Math.max(1, maxX - minX)) * plotW;
+    const barGap = 3;
+    const barStep = plotW / bins.length;
+    const rects = bins.map((b, i) => {
+      const count = Number(b.count) || 0;
+      const barH = (count / maxCount) * plotH;
+      const x = left + i * barStep + barGap / 2;
+      const y = top + plotH - barH;
+      const bw = Math.max(2, barStep - barGap);
+      const active = mean >= b.from && mean <= b.to;
+      return '<rect class="' + (active ? 'sum-bar active' : 'sum-bar') + '" x="' + x.toFixed(1)
+        + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + barH.toFixed(1)
+        + '"><title>' + b.from + '–' + b.to + ': ' + count + ' kỳ</title></rect>';
+    }).join('');
+    return '<svg class="sum-dist-svg" viewBox="0 0 ' + w + ' ' + h + '" role="img" aria-label="Phân bố tổng 6 số">'
+      + rects
+      + '<line class="sum-mean-line" x1="' + meanX.toFixed(1) + '" x2="' + meanX.toFixed(1)
+      + '" y1="' + top + '" y2="' + (top + plotH) + '"></line>'
+      + '<text class="sum-mean-label" x="' + Math.min(w - 115, Math.max(left, meanX + 6)).toFixed(1)
+      + '" y="' + (top + 14) + '">kỳ vọng ' + Number(hist.expectedMean).toFixed(1) + '</text>'
+      + '<text class="sum-axis-label" x="' + left + '" y="' + (h - 8) + '">' + minX + '</text>'
+      + '<text class="sum-axis-label" x="' + (w - right - 34) + '" y="' + (h - 8) + '">' + maxX + '</text>'
+      + '</svg>';
+  }
+
+  function renderDryStreak(s) {
+    const list = $('#dry-list');
+    if (!list) return;
+    const dry = ((s && s.numbers) || []).filter(it => it.gapRatio !== null && it.gapRatio >= 1.8 && it.freq >= 3)
+      .sort((a, b) => (b.gapRatio - a.gapRatio) || (b.gap - a.gap) || (a.n - b.n))
+      .slice(0, 8);
+    list.innerHTML = '';
+    if (!dry.length) {
+      list.innerHTML = '<p class="empty-inline">Không có số nào khô bất thường — mọi thứ trong vùng nhiễu bình thường 👍</p>';
+      return;
+    }
+    dry.forEach(it => {
+      const row = document.createElement('div');
+      row.className = 'dry-row';
+      row.appendChild(statBall(it, true));
+      const body = document.createElement('div');
+      body.className = 'dry-body';
+      body.innerHTML = '<div class="dry-text">khô <b>' + it.gap + '</b> kỳ · TB chỉ '
+        + Number(it.avgGap).toFixed(1) + ' · gấp <b>' + Number(it.gapRatio).toFixed(1) + '×</b></div>'
+        + '<div class="dry-bar"><span style="width:' + Math.min(100, it.gapRatio / 3 * 100).toFixed(0) + '%"></span></div>';
+      row.appendChild(body);
+      list.appendChild(row);
     });
   }
 

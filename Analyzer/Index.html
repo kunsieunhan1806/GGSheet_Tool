@@ -211,6 +211,40 @@
             <div class="heat-grid" id="heat-grid"></div>
           </div>
 
+          <div class="card hidden" id="card-special-stats">
+            <div class="card-label">⭐ Thống kê số đặc biệt</div>
+            <p class="heat-hint" id="special-note"></p>
+            <div class="special-ranks">
+              <div>
+                <div class="mini-card-label">Lệch cao</div>
+                <div class="rank-row" id="rank-special-hot"></div>
+              </div>
+              <div>
+                <div class="mini-card-label">Lệch thấp</div>
+                <div class="rank-row" id="rank-special-cold"></div>
+              </div>
+            </div>
+            <div class="heat-grid heat-grid-special" id="heat-grid-special"></div>
+          </div>
+
+          <div class="card" id="card-pairs">
+            <div class="card-label">🔗 Cặp số hay đi cùng nhau</div>
+            <div class="stats-warn hidden" id="pairs-warn"></div>
+            <div class="pair-list" id="pair-list"></div>
+          </div>
+
+          <div class="card" id="card-sum-dist">
+            <div class="card-label">📊 Phân bố tổng 6 số</div>
+            <div class="sum-chart" id="sum-chart"></div>
+            <p class="heat-hint">Thuật toán gợi ý ưu tiên bộ số có tổng quanh vùng kỳ vọng — biểu đồ này cho thấy các kỳ thực tế phân bố ra sao.</p>
+          </div>
+
+          <div class="card" id="card-dry-streak">
+            <div class="card-label">🏜️ Số đang khô bất thường</div>
+            <p class="stats-disclaimer">Số khô lâu không ra dễ hơn ở kỳ sau (gambler's fallacy) — đây chỉ là mô tả quá khứ.</p>
+            <div class="dry-list" id="dry-list"></div>
+          </div>
+
           <div class="card odds-card">
             <div class="card-label">Xác suất &amp; EV cố định</div>
             <div class="odds-table-wrap">
