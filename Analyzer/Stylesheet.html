@@ -480,6 +480,7 @@ h3.history-title {
 }
 .msg.success { background: #d8f5e3; color: #08623a; }
 .msg.error   { background: #fde2e5; color: #931321; }
+.msg.info    { background: #eef0ff; color: var(--indigo-800); }
 
 /* ===== STAT CARDS ===== */
 .stat-cards {
@@ -886,7 +887,38 @@ h3.history-title {
   gap: 6px;
 }
 .merged-head-right .ci-status { margin-left: 0; }
-.merged-head-right .btn-delete { padding: 2px 6px; font-size: 16px; }
+.row-actions,
+.fin-session-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.fin-session-actions { margin-left: 0; }
+.btn-row-action {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #fff;
+  border: 1px solid var(--gray-100);
+  color: var(--gray-500);
+  cursor: pointer;
+  font-size: 15px;
+  border-radius: 6px;
+  line-height: 1;
+}
+.btn-row-action:hover {
+  background: #eef0ff;
+  border-color: #dfe3ff;
+  color: var(--indigo-700);
+}
+.btn-row-action.btn-danger:hover {
+  background: #fde2e5;
+  border-color: #f8c7cf;
+  color: #931321;
+}
 .merged-result {
   display: flex;
   align-items: center;
@@ -1373,6 +1405,8 @@ h3.history-title {
   .draw-date-input { background: #1d1b35; border-color: #3a3568; color: #ece9f5; }
   .compare-section { border-color: #2c2950; }
   .merged-cmp-block { background: #232145; }
+  .btn-row-action { background: #1d1b35; border-color: #2c2950; color: #c9c5dc; }
+  .btn-row-action:hover { background: #2e2752; border-color: #3a3568; color: #ece9f5; }
   .merged-result-lbl { color: #6b6880; }
   .mrc-avg { color: var(--gold-300); }
   .mrc-baseline { color: #c9c5dc; }

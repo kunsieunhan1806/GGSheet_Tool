@@ -69,6 +69,13 @@ const PICK              = 6;   // giữ cho backward compat
 const SET_COUNT_DEFAULT = 4;
 const SET_COUNT_MAX     = 50;
 
+const VIETLOTT_URLS = {
+  '6/45': 'https://vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/645',
+  '6/55': 'https://vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/655.html'
+};
+const VIETLOTT_TZ = 'Asia/Ho_Chi_Minh';
+const VIETLOTT_LAST_ERROR_PROP = 'VIETLOTT_LAST_FETCH_ERROR';
+
 /* =========================================================================
  * WEB APP ENTRY POINT
  * ========================================================================= */
@@ -148,50 +155,49 @@ function getData(ticketType) {
  * cùng ngày + cùng loại vé còn chưa được so sánh.
  */
 function addResult(payload) {
-  if (!payload) throw new Error('Không có dữ liệu.');
-  const type = normalizeType(payload.type);
-  const cfg  = TYPES[type];
-  const mainCount = cfg.main || 6;
-
-  const date = parseIso(payload.date);
-  if (!date) throw new Error('Ngày quay không hợp lệ.');
-
-  const nums = sanitizeNumbers(payload.numbers, cfg.max, mainCount);
-  let special = null;
-  if (cfg.hasSpecial) {
-    const spMax = cfg.max;
-    special = sanitizeSpecial(payload.special, spMax, nums);
-  }
-
-  const notes = String(payload.notes || '');
-
+  const normalized = normalizeResultPayload(payload);
+  const type = normalized.type;
+  const cfg = TYPES[type];
   const sheet   = getOrCreateSheet();
-  const lastRow = sheet.getLastRow();
-
-  // Chống trùng: cùng ngày + cùng loại vé
-  if (lastRow >= 2) {
-    const rows = sheet.getRange(2, 1, lastRow - 1, 10).getValues();
-    for (let i = 0; i < rows.length; i++) {
-      if (!(rows[i][0] instanceof Date)) continue;
-      if (!sameDate(rows[i][0], date)) continue;
-      if (normalizeType(rows[i][1]) !== type) continue;
-      throw new Error('Đã có kết quả ' + cfg.label + ' cho ngày ' + toVN(date) + '.');
-    }
+  const existing = findResultRowByDateType(normalized.date, type, null);
+  if (existing) {
+    throw new Error('Đã có kết quả ' + cfg.label + ' cho ngày ' + toVN(normalized.date) + '.');
   }
-
-  // Pad nums lên 6 phần tử cho đúng cột C–H
-  const numsPadded = nums.slice();
-  while (numsPadded.length < 6) numsPadded.push('');
 
   const newRow = sheet.getLastRow() + 1;
-  const rowData = [date, type]
-    .concat(numsPadded)
-    .concat([special === null ? '' : special])
-    .concat([notes]);
-  sheet.getRange(newRow, 1, 1, HEADERS.length).setValues([rowData]);
+  writeResultRow(sheet, newRow, normalized);
 
   // Auto-match: cập nhật so sánh cho các bộ gợi ý cùng ngày
-  autoMatchForDate(date, type, nums, special);
+  autoMatchForDate(normalized.date, type, normalized.nums, normalized.special);
+
+  return getData(type);
+}
+
+/**
+ * Sửa một kỳ quay đã lưu. Khi ngày/loại/số thay đổi, tự tính lại các dòng so sánh liên quan.
+ */
+function updateResult(rowIndex, payload) {
+  const sheet = getOrCreateSheet();
+  rowIndex = parseInt(rowIndex, 10);
+  if (isNaN(rowIndex) || rowIndex < 2 || rowIndex > sheet.getLastRow()) {
+    throw new Error('Dòng kết quả không hợp lệ.');
+  }
+
+  const oldResult = readResultRow(sheet, rowIndex);
+  const normalized = normalizeResultPayload(payload);
+  const type = normalized.type;
+  const cfg = TYPES[type];
+  const duplicate = findResultRowByDateType(normalized.date, type, rowIndex);
+  if (duplicate) {
+    throw new Error('Đã có kết quả ' + cfg.label + ' cho ngày ' + toVN(normalized.date) + '.');
+  }
+
+  writeResultRow(sheet, rowIndex, normalized);
+
+  if (oldResult && (!sameDate(oldResult.date, normalized.date) || oldResult.type !== type)) {
+    clearComparisonForDate(oldResult.date, oldResult.type);
+  }
+  autoMatchForDate(normalized.date, type, normalized.nums, normalized.special);
 
   return getData(type);
 }
@@ -201,11 +207,14 @@ function addResult(payload) {
  */
 function deleteResult(rowIndex, ticketType) {
   const sheet = getOrCreateSheet();
+  rowIndex = parseInt(rowIndex, 10);
   if (rowIndex < 2 || rowIndex > sheet.getLastRow()) {
     throw new Error('Dòng không hợp lệ.');
   }
+  const oldResult = readResultRow(sheet, rowIndex);
   sheet.deleteRow(rowIndex);
-  return getData(ticketType);
+  if (oldResult) clearComparisonForDate(oldResult.date, oldResult.type);
+  return getData(ticketType || (oldResult && oldResult.type) || DEFAULT_TYPE);
 }
 
 /**
@@ -255,6 +264,18 @@ function saveGeneratedSets(payload) {
   });
 
   const sheet = getOrCreateCompareSheet();
+  const data = getComparisonData(type);
+  if (hasDuplicateSetInList(sets)) {
+    data.skippedDuplicate = true;
+    data.message = 'Trong danh sách có bộ số bị trùng, chưa lưu vào BoDaSoSanh.';
+    return data;
+  }
+  if (findDuplicateSavedSets(sheet, type, drawDate, sets, null)) {
+    data.skippedDuplicate = true;
+    data.message = 'Bộ số này đã được lưu cho cùng ngày quay và cùng loại vé.';
+    return data;
+  }
+
   const row = sheet.getLastRow() + 1;
   sheet.getRange(row, 1, 1, COMPARE_HEADERS.length).setValues([[
     new Date(),
@@ -275,6 +296,52 @@ function saveGeneratedSets(payload) {
   }
 
   return getComparisonData(type);
+}
+
+/**
+ * Đổi ngày quay dự kiến của một lần chơi đã lưu trong BoDaSoSanh.
+ */
+function updateSavedSetDrawDate(payload) {
+  if (!payload) throw new Error('Không có dữ liệu cập nhật.');
+  const rowIndex = parseInt(payload.rowIndex, 10);
+  const drawDate = parseIso(payload.drawDate);
+  if (!drawDate) throw new Error('Ngày quay dự kiến không hợp lệ.');
+
+  const sheet = getOrCreateCompareSheet();
+  if (isNaN(rowIndex) || rowIndex < 2 || rowIndex > sheet.getLastRow()) {
+    throw new Error('Dòng bộ số không hợp lệ.');
+  }
+
+  const row = sheet.getRange(rowIndex, 1, 1, COMPARE_HEADERS.length).getValues()[0];
+  const type = normalizeType(row[1]);
+  const sets = parseJsonSafe(row[3], []);
+  if (findDuplicateSavedSets(sheet, type, drawDate, sets, rowIndex)) {
+    throw new Error('Đã có bộ số giống hệt cho ngày quay này.');
+  }
+
+  sheet.getRange(rowIndex, 5).setValue(toIso(drawDate));
+  clearComparisonRow(sheet, rowIndex);
+
+  const actual = findActualResult(drawDate, type);
+  if (actual) {
+    writeComparisonResult(sheet, rowIndex, type, actual.numbers, actual.special);
+  }
+
+  return getComparisonData(payload.ticketType || type);
+}
+
+/**
+ * Xoá một lần chơi đã lưu trong BoDaSoSanh.
+ */
+function deleteSavedSet(rowIndex, ticketType) {
+  const sheet = getOrCreateCompareSheet();
+  rowIndex = parseInt(rowIndex, 10);
+  if (isNaN(rowIndex) || rowIndex < 2 || rowIndex > sheet.getLastRow()) {
+    throw new Error('Dòng bộ số không hợp lệ.');
+  }
+  const type = normalizeType(sheet.getRange(rowIndex, 2).getValue());
+  sheet.deleteRow(rowIndex);
+  return getComparisonData(ticketType || type);
 }
 
 /**
@@ -393,6 +460,206 @@ function saveJackpot(payload) {
   }
 
   return getFinanceData();
+}
+
+/**
+ * Cài trigger tự lấy kết quả Vietlott sau giờ quay.
+ * Chạy hàm này một lần trong Apps Script editor để cấp quyền UrlFetchApp/ScriptApp/MailApp.
+ */
+function installVietlottAutoFetchTriggers() {
+  const handlers = ['autoFetchMega645', 'autoFetchPower655'];
+  ScriptApp.getProjectTriggers().forEach(function (trigger) {
+    if (handlers.indexOf(trigger.getHandlerFunction()) >= 0) {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+
+  [ScriptApp.WeekDay.WEDNESDAY, ScriptApp.WeekDay.FRIDAY, ScriptApp.WeekDay.SUNDAY]
+    .forEach(function (day) { createVietlottWeeklyTrigger('autoFetchMega645', day); });
+  [ScriptApp.WeekDay.TUESDAY, ScriptApp.WeekDay.THURSDAY, ScriptApp.WeekDay.SATURDAY]
+    .forEach(function (day) { createVietlottWeeklyTrigger('autoFetchPower655', day); });
+
+  return 'Đã cài trigger Vietlott: Mega 6/45 (T4, T6, CN) và Power 6/55 (T3, T5, T7), khoảng 19:10.';
+}
+
+function autoFetchMega645() {
+  return runVietlottAutoFetchForType('6/45', true, false);
+}
+
+function autoFetchPower655() {
+  return runVietlottAutoFetchForType('6/55', true, false);
+}
+
+/**
+ * Chạy tay để thử lấy kết quả mới nhất cho cả 2 loại vé.
+ */
+function fetchLatestVietlottNow() {
+  return [
+    runVietlottAutoFetchForType('6/45', false, false),
+    runVietlottAutoFetchForType('6/55', false, false)
+  ];
+}
+
+function getVietlottFetchStatus() {
+  const raw = PropertiesService.getDocumentProperties().getProperty(VIETLOTT_LAST_ERROR_PROP);
+  return parseJsonSafe(raw, null);
+}
+
+function createVietlottWeeklyTrigger(handler, weekDay) {
+  ScriptApp.newTrigger(handler)
+    .timeBased()
+    .onWeekDay(weekDay)
+    .atHour(19)
+    .nearMinute(10)
+    .inTimezone(VIETLOTT_TZ)
+    .create();
+}
+
+function runVietlottAutoFetchForType(type, expectToday, throwOnError) {
+  type = normalizeType(type);
+  try {
+    const result = fetchVietlottResult(type);
+    const today = todayInVietlottTimezone();
+    if (expectToday && !sameDate(result.date, today)) {
+      throw new Error('Vietlott chưa trả kết quả ' + type + ' cho ngày ' + toVN(today)
+        + ' (trang hiện là ngày ' + toVN(result.date) + ').');
+    }
+    const outcome = upsertVietlottResult(result);
+    PropertiesService.getDocumentProperties().deleteProperty(VIETLOTT_LAST_ERROR_PROP);
+    return outcome;
+  } catch (err) {
+    notifyVietlottFetchError(type, err);
+    if (throwOnError) throw err;
+    return {
+      type: type,
+      status: 'error',
+      message: err && err.message ? err.message : String(err)
+    };
+  }
+}
+
+function todayInVietlottTimezone() {
+  return parseIso(Utilities.formatDate(new Date(), VIETLOTT_TZ, 'yyyy-MM-dd'));
+}
+
+function fetchVietlottResult(type) {
+  type = normalizeType(type);
+  const url = VIETLOTT_URLS[type];
+  const fetchUrl = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'nocatche=' + Date.now();
+  const response = UrlFetchApp.fetch(fetchUrl, {
+    muteHttpExceptions: true,
+    followRedirects: true,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; Google Apps Script Vietlott checker)',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'vi-VN,vi;q=0.9,en;q=0.8',
+      'Cache-Control': 'no-cache'
+    }
+  });
+
+  const code = response.getResponseCode();
+  const html = response.getContentText('UTF-8');
+  if (code < 200 || code >= 300) {
+    throw new Error('Không tải được Vietlott ' + type + ' (HTTP ' + code + ').');
+  }
+  return parseVietlottResultHtml(html, type, url);
+}
+
+function parseVietlottResultHtml(html, type, sourceUrl) {
+  const cfg = TYPES[type];
+  if (!html) throw new Error('HTML Vietlott rỗng.');
+
+  const titleMatch = html.match(/Kỳ\s+quay\s+thưởng\s*<b>\s*#?([^<]+)\s*<\/b>\s*ngày\s*<b>\s*(\d{2}\/\d{2}\/\d{4})\s*<\/b>/i)
+    || html.replace(/<[^>]+>/g, ' ').match(/Kỳ\s+quay\s+thưởng\s*#?\s*([0-9]+)\s*ngày\s*(\d{2}\/\d{2}\/\d{4})/i);
+  if (!titleMatch) {
+    throw new Error('Không tìm thấy kỳ quay/ngày quay trong HTML Vietlott.');
+  }
+
+  const drawId = String(titleMatch[1] || '').trim();
+  const date = parseVnDate(titleMatch[2]);
+  if (!date) throw new Error('Ngày quay Vietlott không hợp lệ: ' + titleMatch[2]);
+
+  const blockMatch = html.match(/<div[^>]*class=["'][^"']*day_so_ket_qua_v2[^"']*["'][^>]*>([\s\S]*?)<\/div>/i);
+  const block = blockMatch ? blockMatch[1] : html;
+  const numbers = [];
+  const spanRe = /<span\b[^>]*class=["'][^"']*\bbong_tron\b[^"']*["'][^>]*>\s*(\d{1,2})\s*<\/span>/gi;
+  let m;
+  while ((m = spanRe.exec(block)) !== null) {
+    numbers.push(parseInt(m[1], 10));
+  }
+
+  const expected = cfg.hasSpecial ? 7 : 6;
+  if (numbers.length < expected) {
+    throw new Error('Không đọc đủ bộ số Vietlott ' + type + ' từ HTML (đọc được ' + numbers.length + '/' + expected + ').');
+  }
+
+  const mainNumbers = sanitizeNumbers(numbers.slice(0, 6), cfg.max, cfg.main || 6);
+  const special = cfg.hasSpecial ? sanitizeSpecial(numbers[6], cfg.max, mainNumbers) : null;
+  return {
+    date: toIso(date),
+    type: type,
+    numbers: mainNumbers,
+    special: special,
+    notes: 'Tự lấy từ Vietlott kỳ #' + drawId + ' - ' + sourceUrl
+  };
+}
+
+function upsertVietlottResult(payload) {
+  const type = normalizeType(payload.type);
+  const date = parseIso(payload.date);
+  const existing = findResultRowByDateType(date, type, null);
+
+  if (existing) {
+    const sheet = getOrCreateSheet();
+    const oldResult = readResultRow(sheet, existing.rowIndex);
+    if (sameResultNumbers(oldResult, payload)) {
+      return { type: type, status: 'skipped', date: toIso(date), message: 'Kết quả đã tồn tại.' };
+    }
+    updateResult(existing.rowIndex, payload);
+    return { type: type, status: 'updated', date: toIso(date), message: 'Đã cập nhật kết quả từ Vietlott.' };
+  }
+
+  addResult(payload);
+  return { type: type, status: 'added', date: toIso(date), message: 'Đã thêm kết quả từ Vietlott.' };
+}
+
+function sameResultNumbers(existing, payload) {
+  if (!existing) return false;
+  const nums = (payload.numbers || []).map(Number).sort(numberAsc);
+  const oldNums = (existing.numbers || []).map(Number).sort(numberAsc);
+  if (nums.length !== oldNums.length) return false;
+  for (let i = 0; i < nums.length; i++) {
+    if (nums[i] !== oldNums[i]) return false;
+  }
+  const sp = payload.special === null || payload.special === '' || payload.special === undefined
+    ? null
+    : Number(payload.special);
+  return (existing.special === null ? null : Number(existing.special)) === sp;
+}
+
+function notifyVietlottFetchError(type, err) {
+  const message = err && err.message ? err.message : String(err);
+  const payload = {
+    time: new Date().toISOString(),
+    type: type,
+    message: message
+  };
+  PropertiesService.getDocumentProperties().setProperty(VIETLOTT_LAST_ERROR_PROP, JSON.stringify(payload));
+
+  try {
+    const email = Session.getEffectiveUser().getEmail() || Session.getActiveUser().getEmail();
+    if (email && MailApp.getRemainingDailyQuota() > 0) {
+      MailApp.sendEmail({
+        to: email,
+        subject: 'Vietlott auto-match lỗi (' + type + ')',
+        body: 'Không tự lấy được kết quả Vietlott ' + type + '.\n\n'
+          + message + '\n\n'
+          + 'Hãy kiểm tra lại cấu trúc HTML Vietlott hoặc nhập tay kết quả trong web app.'
+      });
+    }
+  } catch (mailErr) {
+    console.warn('Không gửi được email cảnh báo Vietlott:', mailErr);
+  }
 }
 
 /* =========================================================================
@@ -840,6 +1107,81 @@ function ensureHeader(sheet, headers) {
   sheet.setFrozenRows(1);
 }
 
+function normalizeResultPayload(payload) {
+  if (!payload) throw new Error('Không có dữ liệu.');
+  const type = normalizeType(payload.type);
+  const cfg  = TYPES[type];
+  const mainCount = cfg.main || 6;
+
+  const date = parseIso(payload.date);
+  if (!date) throw new Error('Ngày quay không hợp lệ.');
+
+  const nums = sanitizeNumbers(payload.numbers, cfg.max, mainCount);
+  let special = null;
+  if (cfg.hasSpecial) {
+    special = sanitizeSpecial(payload.special, cfg.max, nums);
+  }
+
+  return {
+    date: date,
+    type: type,
+    nums: nums,
+    special: special,
+    notes: String(payload.notes || '')
+  };
+}
+
+function writeResultRow(sheet, rowIndex, normalized) {
+  const numsPadded = normalized.nums.slice();
+  while (numsPadded.length < 6) numsPadded.push('');
+
+  const rowData = [normalized.date, normalized.type]
+    .concat(numsPadded)
+    .concat([normalized.special === null ? '' : normalized.special])
+    .concat([normalized.notes]);
+  sheet.getRange(rowIndex, 1, 1, HEADERS.length).setValues([rowData]);
+}
+
+function readResultRow(sheet, rowIndex) {
+  if (rowIndex < 2 || rowIndex > sheet.getLastRow()) return null;
+  const row = sheet.getRange(rowIndex, 1, 1, HEADERS.length).getValues()[0];
+  const date = parseIso(row[0]);
+  if (!date) return null;
+  const type = normalizeType(row[1]);
+  const cfg = TYPES[type];
+  const numbers = [];
+  for (let c = 2; c <= 1 + (cfg.main || 6); c++) {
+    const n = parseInt(row[c], 10);
+    if (!isNaN(n)) numbers.push(n);
+  }
+  const sp = parseInt(row[8], 10);
+  return {
+    rowIndex: rowIndex,
+    date: date,
+    type: type,
+    numbers: numbers.sort(numberAsc),
+    special: cfg.hasSpecial && !isNaN(sp) ? sp : null,
+    notes: row[9] || ''
+  };
+}
+
+function findResultRowByDateType(date, type, ignoreRowIndex) {
+  const sheet = getOrCreateSheet();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+
+  const rows = sheet.getRange(2, 1, lastRow - 1, HEADERS.length).getValues();
+  for (let i = 0; i < rows.length; i++) {
+    const rowIndex = i + 2;
+    if (ignoreRowIndex && rowIndex === ignoreRowIndex) continue;
+    if (!(rows[i][0] instanceof Date)) continue;
+    if (!sameDate(rows[i][0], date)) continue;
+    if (normalizeType(rows[i][1]) !== type) continue;
+    return { rowIndex: rowIndex, row: rows[i] };
+  }
+  return null;
+}
+
 function getHistoricalResults(ticketType) {
   const type = normalizeType(ticketType);
   const cfg = TYPES[type];
@@ -905,6 +1247,60 @@ function readCompareRows(ticketType) {
 
   rows.sort(compareByDrawDateDesc);
   return rows;
+}
+
+function clearComparisonForDate(date, type) {
+  const sheet = getOrCreateCompareSheet();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+
+  const rows = sheet.getRange(2, 1, lastRow - 1, COMPARE_HEADERS.length).getValues();
+  rows.forEach(function (row, idx) {
+    if (normalizeType(row[1]) !== type) return;
+    if (!sameDate(row[4], date)) return;
+    clearComparisonRow(sheet, idx + 2);
+  });
+}
+
+function clearComparisonRow(sheet, rowIndex) {
+  sheet.getRange(rowIndex, 6, 1, 5).clearContent();
+}
+
+function findDuplicateSavedSets(sheet, type, drawDate, sets, ignoreRowIndex) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+  const signature = buildSetsSignature(sets);
+  if (!signature) return null;
+
+  const rows = sheet.getRange(2, 1, lastRow - 1, COMPARE_HEADERS.length).getValues();
+  for (let i = 0; i < rows.length; i++) {
+    const rowIndex = i + 2;
+    if (ignoreRowIndex && rowIndex === ignoreRowIndex) continue;
+    if (normalizeType(rows[i][1]) !== type) continue;
+    if (!sameDate(rows[i][4], drawDate)) continue;
+    const existingSets = parseJsonSafe(rows[i][3], []);
+    if (buildSetsSignature(existingSets) === signature) {
+      return { rowIndex: rowIndex };
+    }
+  }
+  return null;
+}
+
+function hasDuplicateSetInList(sets) {
+  const seen = {};
+  for (let i = 0; i < sets.length; i++) {
+    const key = (sets[i] || []).map(Number).sort(numberAsc).join('-');
+    if (seen[key]) return true;
+    seen[key] = true;
+  }
+  return false;
+}
+
+function buildSetsSignature(sets) {
+  if (!Array.isArray(sets)) return '';
+  return sets.map(function (set) {
+    return (set || []).map(Number).sort(numberAsc).join('-');
+  }).filter(Boolean).sort().join('|');
 }
 
 function findActualResult(date, type) {
@@ -1066,6 +1462,12 @@ function parseIso(value) {
   const m = String(value).match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (!m) return null;
   return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+}
+
+function parseVnDate(value) {
+  const m = String(value || '').match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!m) return null;
+  return new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
 }
 
 function toIso(value) {
