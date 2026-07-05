@@ -11,6 +11,8 @@
   let method     = 'balanced';
   let statsWindow = '50';
   let lastResult = null;
+  let editingResult = null;
+  let lastFetchErrorShownAt = '';
 
   /* ===== UTIL ===== */
   const $  = sel => document.querySelector(sel);
@@ -163,6 +165,7 @@
     btn.addEventListener('click', () => {
       if (btn.dataset.type === ticketType) return;
       ticketType = btn.dataset.type;
+      clearResultEditMode();
       $$('.type-btn').forEach(b => b.classList.toggle('active', b === btn));
       const radio = document.querySelector('input[name=type][value="' + ticketType + '"]');
       if (radio) radio.checked = true;
@@ -253,7 +256,7 @@
   function load() {
     showOverlay(true);
     google.script.run
-      .withSuccessHandler(data => { applyData(data); loadComparison(); loadFinance(); })
+      .withSuccessHandler(data => { applyData(data); loadComparison(); loadFinance(); loadVietlottStatus(); })
       .withFailureHandler(handleFailure)
       .getData(ticketType);
   }
@@ -272,12 +275,71 @@
       .getFinanceData();
   }
 
+  function loadVietlottStatus() {
+    google.script.run
+      .withSuccessHandler(status => {
+        if (!status || !status.time || status.time === lastFetchErrorShownAt) return;
+        lastFetchErrorShownAt = status.time;
+        alert('⚠️ Tự lấy kết quả Vietlott bị lỗi (' + status.type + '):\n' + status.message);
+      })
+      .withFailureHandler(err => console.warn('Vietlott status load failed:', err))
+      .getVietlottFetchStatus();
+  }
+
   const statsWindowSelect = $('#stats-window');
   if (statsWindowSelect) {
     statsWindowSelect.addEventListener('change', () => {
       statsWindow = statsWindowSelect.value;
       renderStats();
     });
+  }
+
+  function iconButton(title, label, cls, onClick) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn-row-action ' + (cls || '');
+    btn.title = title;
+    btn.setAttribute('aria-label', title);
+    btn.textContent = label;
+    btn.addEventListener('click', onClick);
+    return btn;
+  }
+
+  function handleCompareMutation(data) {
+    if (data && data.rows) {
+      cmpData = data;
+      renderComparison();
+    } else {
+      loadComparison();
+    }
+    loadFinance();
+    showOverlay(false);
+  }
+
+  function deleteSavedSetRow(row) {
+    if (!row || !row.rowIndex) return;
+    if (!confirm('Xoá lần chơi đã lưu cho ngày ' + fmtVN(row.drawDate || row.createdAt) + '?')) return;
+    showOverlay(true);
+    google.script.run
+      .withSuccessHandler(handleCompareMutation)
+      .withFailureHandler(handleFailure)
+      .deleteSavedSet(row.rowIndex, ticketType);
+  }
+
+  function editSavedSetDate(row) {
+    if (!row || !row.rowIndex) return;
+    const current = row.drawDate || todayIso();
+    const next = prompt('Nhập ngày quay dự kiến mới (YYYY-MM-DD):', current);
+    if (next === null) return;
+    if (!parseDate(next)) {
+      alert('Ngày không hợp lệ. Hãy nhập dạng YYYY-MM-DD.');
+      return;
+    }
+    showOverlay(true);
+    google.script.run
+      .withSuccessHandler(handleCompareMutation)
+      .withFailureHandler(handleFailure)
+      .updateSavedSetDrawDate({ rowIndex: row.rowIndex, drawDate: next, ticketType: ticketType });
   }
 
   /* ===== TOP-LEVEL RENDER ===== */
@@ -413,7 +475,11 @@
     google.script.run
       .withSuccessHandler(data => {
         cmpData = data; renderComparison(); loadFinance();
-        showSaveStatus(true, '✅ Đã lưu ' + lastResult.sets.length + ' bộ số vào sheet BoDaSoSanh.');
+        if (data && data.skippedDuplicate) {
+          showSaveStatus(false, '⚠️ ' + (data.message || 'Bộ số này đã được lưu trước đó.'));
+        } else {
+          showSaveStatus(true, '✅ Đã lưu ' + lastResult.sets.length + ' bộ số vào sheet BoDaSoSanh.');
+        }
       })
       .withFailureHandler(err => showSaveStatus(false, '❌ Lưu thất bại: ' + (err && err.message ? err.message : String(err))))
       .saveGeneratedSets(payload);
@@ -654,6 +720,38 @@
       p => { historyPage = p; renderHistory(); }, 'kỳ');
   }
 
+  function startEditResult(r) {
+    if (!r) return;
+    editingResult = { rowIndex: r.rowIndex };
+    switchTab('form');
+
+    const form = $('#entry-form');
+    const radio = form.querySelector('input[name=type][value="' + r.type + '"]');
+    if (radio) radio.checked = true;
+    applyTypeToForm(r.type);
+
+    form.elements.date.value = r.date || todayIso();
+    (r.numbers || []).forEach((n, idx) => {
+      const input = form.elements['n' + (idx + 1)];
+      if (input) input.value = n;
+    });
+    if (r.special != null && form.elements.n7) form.elements.n7.value = r.special;
+    form.elements.notes.value = r.session || '';
+
+    const msg = $('#form-msg');
+    msg.textContent = '✏️ Đang sửa kết quả ngày ' + fmtVN(r.date) + '.';
+    msg.className = 'msg info';
+    msg.classList.remove('hidden');
+    $('#btn-save').textContent = 'Cập nhật kết quả';
+    form.elements.n1.focus();
+  }
+
+  function clearResultEditMode() {
+    editingResult = null;
+    const saveBtn = $('#btn-save');
+    if (saveBtn) saveBtn.textContent = 'Lưu kết quả';
+  }
+
   function buildMergedCard(entry) {
     const item = document.createElement('div');
     item.className = 'history-item merged-item';
@@ -687,13 +785,17 @@
       right.appendChild(st);
     }
     if (hasResult) {
+      const edit = iconButton('Sửa kỳ quay', '✏️', 'btn-edit', () => startEditResult(r));
+      right.appendChild(edit);
+
       const del = document.createElement('button');
-      del.className = 'btn-delete'; del.title = 'Xoá kỳ quay'; del.textContent = '🗑';
+      del.className = 'btn-row-action btn-danger'; del.title = 'Xoá kỳ quay'; del.textContent = '🗑';
+      del.setAttribute('aria-label', 'Xoá kỳ quay');
       del.addEventListener('click', () => {
         if (!confirm('Xoá kết quả ngày ' + fmtVN(r.date) + '?')) return;
         showOverlay(true);
         google.script.run
-          .withSuccessHandler(data => { applyData(data); loadComparison(); })
+          .withSuccessHandler(data => { applyData(data); loadComparison(); loadFinance(); })
           .withFailureHandler(handleFailure)
           .deleteResult(r.rowIndex, ticketType);
       });
@@ -740,6 +842,11 @@
     mhead.className = 'merged-cmp-method';
     mhead.innerHTML = '<span class="ci-method-badge ' + meta.cls + '">' + meta.icon + ' ' + meta.label + '</span>'
       + '<span class="merged-cmp-created">Tạo: ' + fmtVN(row.createdAt) + '</span>';
+    const actions = document.createElement('div');
+    actions.className = 'row-actions';
+    actions.appendChild(iconButton('Sửa ngày quay dự kiến', '📅', 'btn-edit', () => editSavedSetDate(row)));
+    actions.appendChild(iconButton('Xoá lần chơi đã lưu', '🗑', 'btn-danger', () => deleteSavedSetRow(row)));
+    mhead.appendChild(actions);
     block.appendChild(mhead);
 
     (row.sets || []).forEach((set, si) => {
@@ -943,6 +1050,11 @@
       + '<span class="ci-method-badge ' + meta.cls + '">' + meta.icon + ' ' + meta.label + '</span>'
       + '<span class="history-badge ' + (s.type==='6/55'?'b655':'') + '">' + s.type + '</span>'
       + '<span style="font-size:.72rem;color:var(--gray-400);margin-left:auto">' + s.numSets + ' bộ × ' + fmtMoneyShort(finData.ticketPrice) + '</span>';
+    const actions = document.createElement('div');
+    actions.className = 'fin-session-actions';
+    actions.appendChild(iconButton('Sửa ngày quay dự kiến', '📅', 'btn-edit', () => editSavedSetDate(s)));
+    actions.appendChild(iconButton('Xoá lần chơi đã lưu', '🗑', 'btn-danger', () => deleteSavedSetRow(s)));
+    head.appendChild(actions);
     item.appendChild(head);
 
     const body = document.createElement('div'); body.className='fin-session-body';
@@ -1033,7 +1145,8 @@
     }
 
     showOverlay(true);
-    google.script.run
+    const wasEditing = !!editingResult;
+    const runner = google.script.run
       .withSuccessHandler(data => {
         if (data.ticketType!==ticketType) {
           ticketType=data.ticketType;
@@ -1042,8 +1155,10 @@
         }
         applyData(data, () => {
           loadComparison(); loadFinance();
+          clearResultEditMode();
           e.target.reset(); setDefaults();
-          msg.textContent='✅ Đã lưu kết quả!'; msg.className='msg success'; msg.classList.remove('hidden');
+          msg.textContent=wasEditing ? '✅ Đã cập nhật kết quả!' : '✅ Đã lưu kết quả!';
+          msg.className='msg success'; msg.classList.remove('hidden');
           setTimeout(()=>msg.classList.add('hidden'),3000);
           if (window.innerWidth<768) { switchTab('stats'); window.scrollTo({top:0,behavior:'smooth'}); }
         });
@@ -1052,8 +1167,10 @@
         showOverlay(false);
         msg.textContent='❌ '+(err&&err.message?err.message:String(err));
         msg.className='msg error'; msg.classList.remove('hidden');
-      })
-      .addResult(payload);
+      });
+
+    if (wasEditing) runner.updateResult(editingResult.rowIndex, payload);
+    else runner.addResult(payload);
   });
 
   $('#form-type').addEventListener('change', e => {
@@ -1061,6 +1178,7 @@
   });
 
   $('#entry-form').addEventListener('reset', () => {
+    clearResultEditMode();
     setTimeout(()=>{
       const checked=document.querySelector('input[name=type]:checked');
       applyTypeToForm(checked?checked.value:ticketType);
