@@ -353,6 +353,23 @@ h3.history-title {
   text-align: right; line-height: 1.4;
   min-width: 56px; max-width: 70px;
 }
+.gen-specials {
+  background: #fff;
+  border: 1px solid var(--gold-100);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.gen-specials-label {
+  min-width: 120px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--indigo-700);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 
 /* ===== NUMBER BALL ===== */
 .ball {
@@ -860,6 +877,42 @@ h3.history-title {
 .method-rank-card.rank-3 { border-left-color: #cd7f32; }
 .method-rank-card.rank-4 { border-left-color: var(--gray-200); }
 .method-rank-card.no-data { opacity: 0.55; }
+.backtest-card {
+  margin: 12px 0 16px;
+}
+.backtest-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+#backtest-status {
+  font-size: 0.78rem;
+  color: var(--gray-500);
+}
+.backtest-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-top: 12px;
+}
+.backtest-item {
+  border: 1px solid var(--gray-100);
+  border-radius: var(--radius);
+  padding: 10px;
+  background: #fff;
+}
+.backtest-item b {
+  display: block;
+  color: var(--gray-800);
+  margin-bottom: 6px;
+}
+.backtest-item span {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--gray-500);
+  line-height: 1.45;
+}
 .mrc-head {
   display: flex; align-items: center;
   justify-content: space-between;
@@ -1497,6 +1550,7 @@ h3.history-title {
   .method-grid { grid-template-columns: repeat(4, 1fr); }
   .stat-cards { grid-template-columns: 1fr 1fr 1fr; }
   .method-rank-grid { grid-template-columns: repeat(4, 1fr); }
+  .backtest-grid { grid-template-columns: repeat(4, 1fr); }
   .fin-summary-cards { grid-template-columns: 1fr 1fr 1fr; }
   .fin-method-grid { grid-template-columns: repeat(4, 1fr); }
 }
@@ -1507,8 +1561,8 @@ h3.history-title {
     background: linear-gradient(160deg, #14122b 0%, #0c0b1c 60%);
     color: #ece9f5;
   }
-  .card, .stat-card, .gen-set, .history-item, .tabbar, .method-btn,
-  .compare-item, .method-rank-card, .stats-toolbar {
+  .card, .stat-card, .gen-set, .gen-specials, .history-item, .tabbar, .method-btn,
+  .compare-item, .method-rank-card, .backtest-item, .stats-toolbar {
     background: #1d1b35;
     color: #ece9f5;
   }
@@ -1517,6 +1571,7 @@ h3.history-title {
   .tabbar { border-color: #2c2950; }
   .tab:hover:not(.active) { background: #232145; }
   .card-label, .stat-card-num { color: #ece9f5; }
+  .gen-specials-label, .backtest-item b { color: var(--gold-300); }
   h2, h3.history-title { color: var(--gold-300); }
   .compare-title { color: var(--gold-300); }
   .method-btn { border-color: #2c2950; }

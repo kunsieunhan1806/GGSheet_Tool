@@ -378,11 +378,13 @@
   function renderGenerated(res) {
     lastResult = res;
     const methodNames = { hot:'🔥 Số nóng', cold:'❄️ Số nguội', balanced:'⚖️ Cân bằng', random:'🎲 Ngẫu nhiên' };
+    const windowText = res.totalDraws ? modelWindowText(res.modelWindows || []) : '';
     const meta = $('#gen-meta');
     meta.classList.remove('hidden');
     meta.innerHTML = 'Phương pháp: <b>' + (methodNames[res.method] || res.method)
       + '</b> · <b>' + res.sets.length + '</b> bộ · dựa trên <b>' + res.totalDraws + '</b> kỳ quay đã nhập'
       + (res.totalDraws === 0 ? ' (chưa có dữ liệu → bốc ngẫu nhiên)' : '');
+    if (windowText) meta.innerHTML += '<br><span>Model: ' + windowText + '</span>';
     $('#gen-actions').classList.toggle('hidden', !res.sets.length);
     resetCopyUI();
 
@@ -411,6 +413,28 @@
       row.appendChild(m);
       wrap.appendChild(row);
     });
+
+    if (res.specials && res.specials.length) {
+      const box = document.createElement('div');
+      box.className = 'gen-specials';
+      const label = document.createElement('div');
+      label.className = 'gen-specials-label';
+      label.textContent = 'Số ĐB đáng chú ý';
+      const balls = document.createElement('div');
+      balls.className = 'gen-balls';
+      res.specials.forEach(n => balls.appendChild(ball(n, true, true)));
+      box.appendChild(label);
+      box.appendChild(balls);
+      wrap.appendChild(box);
+    }
+  }
+
+  function modelWindowText(windows) {
+    if (!windows || !windows.length) return '';
+    return windows
+      .filter(w => w && w.weight > 0)
+      .map(w => escapeHtml(w.label || w.key) + ' ' + w.weight + '%')
+      .join(' · ');
   }
 
   /* ===== COPY & SAVE ===== */
@@ -755,6 +779,62 @@
     balanced: { icon:'⚖️', label:'Cân bằng',   cls:'m-balanced' },
     random  : { icon:'🎲', label:'Ngẫu nhiên', cls:'m-random' }
   };
+
+  const backtestBtn = $('#btn-backtest');
+  if (backtestBtn) {
+    backtestBtn.addEventListener('click', runBacktest);
+  }
+
+  function runBacktest() {
+    const status = $('#backtest-status');
+    const grid = $('#backtest-grid');
+    const backtestSetCount = Math.min(readSetCount(), 4);
+    if (status) status.textContent = 'Đang chạy...';
+    if (grid) grid.classList.add('hidden');
+    google.script.run
+      .withSuccessHandler(res => renderBacktest(res))
+      .withFailureHandler(err => {
+        if (status) status.textContent = 'Lỗi: ' + (err && err.message ? err.message : String(err));
+      })
+      .backtestSuggestionMethods(ticketType, { setCount: backtestSetCount, maxTests: 30, minTraining: 30 });
+  }
+
+  function renderBacktest(res) {
+    const status = $('#backtest-status');
+    const grid = $('#backtest-grid');
+    if (!grid || !status) return;
+    const methods = res.methods || {};
+    const tested = Number(res.testedDraws) || 0;
+    status.textContent = tested
+      ? ('Đã test ' + tested + ' kỳ gần nhất, mỗi kỳ ' + res.setCount + ' bộ')
+      : ('Cần ít nhất ' + res.minTraining + ' kỳ lịch sử để backtest');
+    grid.innerHTML = '';
+    if (!tested) {
+      grid.classList.add('hidden');
+      return;
+    }
+    const baseline = randomMatchBaseline();
+    ['balanced','hot','cold','random'].sort((a, b) => {
+      const av = methods[a] && methods[a].avgPerSet != null ? methods[a].avgPerSet : -1;
+      const bv = methods[b] && methods[b].avgPerSet != null ? methods[b].avgPerSet : -1;
+      return bv - av;
+    }).forEach(m => {
+      const s = methods[m] || {};
+      const meta = METHOD_META[m] || { icon:'', label:m };
+      const avg = s.avgPerSet != null ? Number(s.avgPerSet) : null;
+      const best = s.avgBestMatch != null ? Number(s.avgBestMatch) : null;
+      const delta = avg !== null ? avg - baseline : null;
+      const item = document.createElement('div');
+      item.className = 'backtest-item';
+      item.innerHTML = '<b>' + meta.icon + ' ' + escapeHtml(meta.label) + '</b>'
+        + '<span>TB mỗi bộ: ' + (avg !== null ? avg.toFixed(3) : '—')
+        + ' · Δ ' + (delta !== null ? signed(delta, 3) : '—') + '</span>'
+        + '<span>Best/phiên: ' + (best !== null ? best.toFixed(3) : '—')
+        + ' · có trùng: ' + (s.hitRate != null ? s.hitRate + '%' : '—') + '</span>';
+      grid.appendChild(item);
+    });
+    grid.classList.remove('hidden');
+  }
 
   function renderComparison() {
     const mStats = cmpData.methodStats || {};

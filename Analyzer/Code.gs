@@ -68,6 +68,14 @@ const MAIN              = 6;   // giữ cho backward compat, dùng cfg.main khi 
 const PICK              = 6;   // giữ cho backward compat
 const SET_COUNT_DEFAULT = 4;
 const SET_COUNT_MAX     = 50;
+const SUGGESTION_WINDOWS = [
+  { key: 'all', label: 'tất cả kỳ', weight: 0.50, limit: null },
+  { key: '50',  label: '50 kỳ gần nhất', weight: 0.30, limit: 50 },
+  { key: '20',  label: '20 kỳ gần nhất', weight: 0.20, limit: 20 }
+];
+const SPECIAL_SIGNAL_WEIGHT = 0.08;
+const BACKTEST_MIN_TRAINING_DRAWS = 30;
+const BACKTEST_MAX_DRAWS = 30;
 
 const VIETLOTT_URLS = {
   '6/45': 'https://vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/645',
@@ -263,10 +271,11 @@ function generateNumbers(ticketType, method, count) {
   const cfg = TYPES[ticketType];
   const setCount = clampInt(count, 1, SET_COUNT_MAX, SET_COUNT_DEFAULT);
   const draws = getHistoricalResults(ticketType);
-  const stats = computeStats(draws, cfg.max, cfg.main || 6);
-  const model = buildNumberModel(stats);
+  const modelInfo = buildSuggestionModel(draws, cfg);
+  const model = modelInfo.model;
   const historicalKeys = buildHistoricalSetLookup(draws);
-  const sets = buildOptimizedPortfolio(model, cfg, method, setCount, historicalKeys);
+  const shapeProfile = buildShapeProfile(draws, cfg);
+  const sets = buildOptimizedPortfolio(model, cfg, method, setCount, historicalKeys, shapeProfile);
 
   return {
     ticketType: ticketType,
@@ -274,9 +283,95 @@ function generateNumbers(ticketType, method, count) {
     method: method,
     max: cfg.max,
     pick: cfg.pick || 6,
-    totalDraws: stats.totalDraws,
+    totalDraws: draws.length,
+    modelWindows: modelInfo.windows,
+    algorithm: 'blend-v1',
     sets: sets,
-    specials: []
+    specials: buildSpecialSuggestions(modelInfo.specialModel, method, setCount)
+  };
+}
+
+function backtestSuggestionMethods(ticketType, options) {
+  ticketType = normalizeType(ticketType);
+  options = options || {};
+  const cfg = TYPES[ticketType];
+  const draws = getHistoricalResults(ticketType);
+  const minTraining = clampInt(options.minTraining, 10, 500, BACKTEST_MIN_TRAINING_DRAWS);
+  const setCount = clampInt(options.setCount, 1, 10, SET_COUNT_DEFAULT);
+  const maxTests = clampInt(options.maxTests, 1, 300, BACKTEST_MAX_DRAWS);
+  const methods = ['balanced', 'hot', 'cold', 'random'];
+  const stats = {};
+
+  methods.forEach(function (method) {
+    stats[method] = {
+      testedDraws: 0,
+      setCount: setCount,
+      avgBestMatch: null,
+      avgPerSet: null,
+      hitRate: null,
+      dist: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 }
+    };
+  });
+
+  if (draws.length <= minTraining) {
+    return {
+      ticketType: ticketType,
+      label: cfg.label,
+      totalDraws: draws.length,
+      testedDraws: 0,
+      minTraining: minTraining,
+      setCount: setCount,
+      methods: stats
+    };
+  }
+
+  const start = Math.max(minTraining, draws.length - maxTests);
+  for (let i = start; i < draws.length; i++) {
+    const training = draws.slice(0, i);
+    const actual = draws[i];
+    methods.forEach(function (method) {
+      const rng = createSeededRandom(ticketType + '|' + method + '|' + actual.date + '|' + setCount);
+      const modelInfo = buildSuggestionModel(training, cfg);
+      const profile = buildShapeProfile(training, cfg);
+      const historicalKeys = buildHistoricalSetLookup(training);
+      const sets = buildOptimizedPortfolio(modelInfo.model, cfg, method, setCount, historicalKeys, profile, rng);
+      const details = buildMatchDetails(sets, actual.numbers || []);
+      const best = details.reduce(function (max, detail) { return Math.max(max, Number(detail.count) || 0); }, 0);
+      const s = stats[method];
+      s.testedDraws += 1;
+      s._sumBest = (s._sumBest || 0) + best;
+      s._hits = (s._hits || 0) + (best > 0 ? 1 : 0);
+      s.dist[best] = (s.dist[best] || 0) + 1;
+      details.forEach(function (detail) {
+        s._sumPerSet = (s._sumPerSet || 0) + (Number(detail.count) || 0);
+        s._setTotal = (s._setTotal || 0) + 1;
+      });
+    });
+  }
+
+  Object.keys(stats).forEach(function (method) {
+    const s = stats[method];
+    if (s.testedDraws > 0) {
+      s.avgBestMatch = Math.round((s._sumBest / s.testedDraws) * 1000) / 1000;
+      s.hitRate = Math.round((s._hits / s.testedDraws) * 1000) / 10;
+    }
+    if (s._setTotal > 0) {
+      s.avgPerSet = Math.round((s._sumPerSet / s._setTotal) * 1000) / 1000;
+    }
+    delete s._sumBest;
+    delete s._hits;
+    delete s._sumPerSet;
+    delete s._setTotal;
+  });
+
+  return {
+    ticketType: ticketType,
+    label: cfg.label,
+    totalDraws: draws.length,
+    testedDraws: Math.max(0, draws.length - start),
+    minTraining: minTraining,
+    setCount: setCount,
+    methods: stats
   };
 }
 
@@ -908,10 +1003,18 @@ function notifyVietlottFetchError(type, err) {
  * ========================================================================= */
 
 function buildNumberModel(stats) {
+  const expectedFreq = stats.totalDraws ? (stats.totalDraws * stats.main / stats.max) : 0;
+  return buildWeightedNumberModel(stats, expectedFreq);
+}
+
+function buildSpecialNumberModel(stats) {
+  return buildWeightedNumberModel(stats, Number(stats.expectedFreq) || 0);
+}
+
+function buildWeightedNumberModel(stats, expectedFreq) {
   const numbers = stats.numbers || [];
   const maxFreq = numbers.reduce(function (m, it) { return Math.max(m, it.freq); }, 0) || 1;
   const maxGap = numbers.reduce(function (m, it) { return Math.max(m, it.gap); }, 0) || 1;
-  const expectedFreq = stats.totalDraws ? (stats.totalDraws * stats.main / stats.max) : 0;
 
   return numbers.map(function (it) {
     const freqNorm = it.freq / maxFreq;
@@ -939,7 +1042,149 @@ function buildNumberModel(stats) {
   });
 }
 
-function buildOptimizedPortfolio(model, cfg, method, count, historicalKeys) {
+function buildSuggestionModel(draws, cfg) {
+  const mainWindows = buildWindowModels(draws, cfg, false);
+  let model = blendWindowModels(mainWindows, cfg.max);
+  let specialModel = null;
+
+  if (cfg.hasSpecial) {
+    const specialWindows = buildWindowModels(draws, cfg, true);
+    const hasSpecialData = specialWindows.some(function (w) { return w.totalDraws > 0; });
+    if (hasSpecialData) {
+      specialModel = blendWindowModels(specialWindows, cfg.max);
+      model = applySpecialSignalToMainModel(model, specialModel);
+    }
+  }
+
+  return {
+    model: model,
+    specialModel: specialModel,
+    windows: summarizeModelWindows(mainWindows)
+  };
+}
+
+function buildWindowModels(draws, cfg, specialOnly) {
+  draws = draws || [];
+  return normalizeWindowWeights(SUGGESTION_WINDOWS.map(function (def) {
+    const subset = def.limit ? draws.slice(Math.max(0, draws.length - def.limit)) : draws.slice();
+    const stats = specialOnly
+      ? computeSpecialStats(subset, cfg.max)
+      : computeStats(subset, cfg.max, cfg.main || 6);
+    return {
+      key: def.key,
+      label: def.label,
+      baseWeight: def.weight,
+      drawLimit: def.limit,
+      totalDraws: specialOnly ? stats.totalDraws : subset.length,
+      model: specialOnly ? buildSpecialNumberModel(stats) : buildNumberModel(stats)
+    };
+  }));
+}
+
+function normalizeWindowWeights(windows) {
+  const activeTotal = windows.reduce(function (sum, w) {
+    return sum + (w.totalDraws > 0 ? w.baseWeight : 0);
+  }, 0);
+  const fallbackTotal = windows.reduce(function (sum, w) { return sum + w.baseWeight; }, 0) || 1;
+  return windows.map(function (w) {
+    const weight = activeTotal > 0
+      ? (w.totalDraws > 0 ? w.baseWeight / activeTotal : 0)
+      : w.baseWeight / fallbackTotal;
+    return Object.assign({}, w, { weight: weight });
+  });
+}
+
+function blendWindowModels(windows, max) {
+  const maps = windows.map(function (w) {
+    const byNumber = {};
+    (w.model || []).forEach(function (it) { byNumber[it.n] = it; });
+    return { weight: w.weight, byNumber: byNumber };
+  });
+  const out = [];
+  for (let n = 1; n <= max; n++) {
+    const item = {
+      n: n,
+      freq: 0,
+      gap: 0,
+      zScore: 0,
+      freqNorm: 0,
+      coldNorm: 0,
+      underNorm: 0,
+      recencyNorm: 0,
+      hotWeight: 0,
+      coldWeight: 0,
+      balancedWeight: 0,
+      randomWeight: 1
+    };
+    let totalWeight = 0;
+    maps.forEach(function (w) {
+      const it = w.byNumber[n];
+      if (!it || w.weight <= 0) return;
+      totalWeight += w.weight;
+      item.freq += (Number(it.freq) || 0) * w.weight;
+      item.gap += (Number(it.gap) || 0) * w.weight;
+      item.zScore += (Number(it.zScore) || 0) * w.weight;
+      item.freqNorm += (Number(it.freqNorm) || 0) * w.weight;
+      item.coldNorm += (Number(it.coldNorm) || 0) * w.weight;
+      item.underNorm += (Number(it.underNorm) || 0) * w.weight;
+      item.recencyNorm += (Number(it.recencyNorm) || 0) * w.weight;
+      item.hotWeight += (Number(it.hotWeight) || 0) * w.weight;
+      item.coldWeight += (Number(it.coldWeight) || 0) * w.weight;
+      item.balancedWeight += (Number(it.balancedWeight) || 0) * w.weight;
+    });
+    if (totalWeight > 0) {
+      item.freq /= totalWeight;
+      item.gap /= totalWeight;
+      item.zScore /= totalWeight;
+      item.freqNorm /= totalWeight;
+      item.coldNorm /= totalWeight;
+      item.underNorm /= totalWeight;
+      item.recencyNorm /= totalWeight;
+      item.hotWeight /= totalWeight;
+      item.coldWeight /= totalWeight;
+      item.balancedWeight /= totalWeight;
+    }
+    out.push(item);
+  }
+  return out;
+}
+
+function applySpecialSignalToMainModel(model, specialModel) {
+  const specialByNumber = {};
+  (specialModel || []).forEach(function (it) { specialByNumber[it.n] = it; });
+  return (model || []).map(function (it) {
+    const sp = specialByNumber[it.n];
+    if (!sp) return it;
+    const mainWeight = 1 - SPECIAL_SIGNAL_WEIGHT;
+    return Object.assign({}, it, {
+      specialZScore: sp.zScore,
+      hotWeight: it.hotWeight * mainWeight + sp.hotWeight * SPECIAL_SIGNAL_WEIGHT,
+      coldWeight: it.coldWeight * mainWeight + sp.coldWeight * SPECIAL_SIGNAL_WEIGHT,
+      balancedWeight: it.balancedWeight * mainWeight + sp.balancedWeight * SPECIAL_SIGNAL_WEIGHT
+    });
+  });
+}
+
+function buildSpecialSuggestions(specialModel, method, count) {
+  if (!specialModel || !specialModel.length) return [];
+  const key = (method === 'random' ? 'balanced' : method) + 'Weight';
+  return specialModel.slice().sort(function (a, b) {
+    return (Number(b[key]) - Number(a[key])) || (Math.abs(b.zScore) - Math.abs(a.zScore)) || (a.n - b.n);
+  }).slice(0, Math.min(6, Math.max(1, count || 4))).map(function (it) { return it.n; });
+}
+
+function summarizeModelWindows(windows) {
+  return (windows || []).map(function (w) {
+    return {
+      key: w.key,
+      label: w.label,
+      weight: Math.round(w.weight * 100),
+      totalDraws: w.totalDraws
+    };
+  });
+}
+
+function buildOptimizedPortfolio(model, cfg, method, count, historicalKeys, shapeProfile, rng) {
   const selected = [];
   const seen = {};
   const byNumber = {};
@@ -953,13 +1198,13 @@ function buildOptimizedPortfolio(model, cfg, method, count, historicalKeys) {
     let bestScore = -Infinity;
 
     for (let t = 0; t < triesPerSet; t++) {
-      const candidate = makeCandidateSet(model, cfg.pick || 6, method);
+      const candidate = makeCandidateSet(model, cfg.pick || 6, method, rng);
       const key = candidate.join('-');
       if (seen[key]) continue;
       if (historicalKeys[key]) continue;
       if (hasExcessiveOverlap(candidate, selected, maxOverlap)) continue;
 
-      const score = scoreCandidate(candidate, byNumber, cfg, method, selected);
+      const score = scoreCandidate(candidate, byNumber, cfg, method, selected, shapeProfile, rng);
       if (score > bestScore) {
         best = candidate;
         bestScore = score;
@@ -967,7 +1212,7 @@ function buildOptimizedPortfolio(model, cfg, method, count, historicalKeys) {
     }
 
     if (!best) {
-      best = makeConstrainedRandomSet(cfg.max, cfg.pick || 6, seen, historicalKeys, selected, maxOverlap);
+      best = makeConstrainedRandomSet(cfg.max, cfg.pick || 6, seen, historicalKeys, selected, maxOverlap, rng);
     }
     selected.push(best);
     seen[best.join('-')] = true;
@@ -976,13 +1221,13 @@ function buildOptimizedPortfolio(model, cfg, method, count, historicalKeys) {
   return selected;
 }
 
-function makeCandidateSet(model, pick, method) {
+function makeCandidateSet(model, pick, method, rng) {
   const pool = model.slice();
   const chosen = [];
   const weightKey = method + 'Weight';
 
   while (chosen.length < pick && pool.length) {
-    const idx = weightedIndex(pool, weightKey);
+    const idx = weightedIndex(pool, weightKey, rng);
     chosen.push(pool[idx].n);
     pool.splice(idx, 1);
   }
@@ -990,14 +1235,14 @@ function makeCandidateSet(model, pick, method) {
   return chosen.sort(numberAsc);
 }
 
-function weightedIndex(items, key) {
+function weightedIndex(items, key, rng) {
   let total = 0;
   const weights = items.map(function (it) {
     const weight = Math.max(0.001, Number(it[key]) || 1);
     total += weight;
     return weight;
   });
-  let r = Math.random() * total;
+  let r = randomValue(rng) * total;
   for (let i = 0; i < weights.length; i++) {
     r -= weights[i];
     if (r <= 0) return i;
@@ -1005,17 +1250,13 @@ function weightedIndex(items, key) {
   return items.length - 1;
 }
 
-function scoreCandidate(set, byNumber, cfg, method, selected) {
+function scoreCandidate(set, byNumber, cfg, method, selected, shapeProfile, rng) {
   const methodScore = average(set.map(function (n) {
     const it = byNumber[n];
     return it ? it[method + 'Weight'] || it.balancedWeight : 0.5;
   }));
 
-  const balanceScore = scoreEvenOdd(set)
-    + scoreLowHigh(set, cfg.max)
-    + scoreSumBand(set, cfg.max, cfg.pick || 6)
-    + scoreSpread(set, cfg.max)
-    + scoreDecades(set);
+  const balanceScore = scoreShapeProfile(set, cfg, shapeProfile);
 
   const shapePenalty = penaltyConsecutive(set)
     + penaltyTooClustered(set)
@@ -1024,8 +1265,82 @@ function scoreCandidate(set, byNumber, cfg, method, selected) {
     return sum + countOverlap(set, oldSet) * 0.03;
   }, 0);
 
-  const randomNoise = Math.random() * 0.04;
+  const randomNoise = randomValue(rng) * 0.04;
   return methodScore * 1.4 + balanceScore - shapePenalty - overlapSoftPenalty + randomNoise;
+}
+
+function buildShapeProfile(draws, cfg) {
+  const max = cfg.max;
+  const pick = cfg.pick || 6;
+  const mid = Math.ceil(max / 2);
+  const rows = [];
+  (draws || []).forEach(function (draw) {
+    const set = (draw.numbers || []).slice(0, pick).map(Number).filter(function (n) {
+      return !isNaN(n) && n >= 1 && n <= max;
+    }).sort(numberAsc);
+    if (set.length !== pick) return;
+    rows.push({
+      sum: set.reduce(function (s, n) { return s + n; }, 0),
+      evens: set.filter(function (n) { return n % 2 === 0; }).length,
+      lows: set.filter(function (n) { return n <= mid; }).length,
+      spread: set[set.length - 1] - set[0],
+      decades: countDecadeBuckets(set)
+    });
+  });
+
+  return {
+    totalDraws: rows.length,
+    sum: summarizeMetric(rows, 'sum'),
+    evens: summarizeMetric(rows, 'evens'),
+    lows: summarizeMetric(rows, 'lows'),
+    spread: summarizeMetric(rows, 'spread'),
+    decades: summarizeMetric(rows, 'decades')
+  };
+}
+
+function summarizeMetric(rows, key) {
+  const values = rows.map(function (row) { return Number(row[key]); }).filter(function (v) { return !isNaN(v); });
+  if (!values.length) return { mean: null, sd: null };
+  const mean = average(values);
+  const variance = average(values.map(function (v) { return Math.pow(v - mean, 2); }));
+  return { mean: mean, sd: Math.sqrt(variance) };
+}
+
+function scoreShapeProfile(set, cfg, profile) {
+  if (!profile || profile.totalDraws < 20) {
+    return scoreEvenOdd(set)
+      + scoreLowHigh(set, cfg.max)
+      + scoreSumBand(set, cfg.max, cfg.pick || 6)
+      + scoreSpread(set, cfg.max)
+      + scoreDecades(set);
+  }
+
+  const max = cfg.max;
+  const mid = Math.ceil(max / 2);
+  const sum = set.reduce(function (s, n) { return s + n; }, 0);
+  const evens = set.filter(function (n) { return n % 2 === 0; }).length;
+  const lows = set.filter(function (n) { return n <= mid; }).length;
+  const spread = set[set.length - 1] - set[0];
+  const decades = countDecadeBuckets(set);
+
+  return scoreMetricAgainstProfile(sum, profile.sum, 0.35, 8)
+    + scoreMetricAgainstProfile(evens, profile.evens, 0.35, 1)
+    + scoreMetricAgainstProfile(lows, profile.lows, 0.30, 1)
+    + scoreMetricAgainstProfile(spread, profile.spread, 0.25, 5)
+    + scoreMetricAgainstProfile(decades, profile.decades, 0.22, 1);
+}
+
+function scoreMetricAgainstProfile(value, metric, weight, minSd) {
+  if (!metric || metric.mean === null || metric.mean === undefined) return weight * 0.5;
+  const sd = Math.max(Number(metric.sd) || 0, minSd || 1);
+  const z = (value - metric.mean) / sd;
+  return Math.exp(-z * z / 2) * weight;
+}
+
+function countDecadeBuckets(set) {
+  const buckets = {};
+  set.forEach(function (n) { buckets[Math.floor((n - 1) / 10)] = true; });
+  return Object.keys(buckets).length;
 }
 
 function scoreEvenOdd(set) {
@@ -1139,11 +1454,11 @@ function hasExcessiveOverlap(candidate, selected, maxOverlap) {
   return false;
 }
 
-function makeConstrainedRandomSet(max, pick, seen, historicalKeys, selected, maxOverlap) {
+function makeConstrainedRandomSet(max, pick, seen, historicalKeys, selected, maxOverlap, rng) {
   for (let round = 0; round < 3; round++) {
     const allowedOverlap = maxOverlap + round;
     for (let t = 0; t < 1000; t++) {
-      const candidate = makeUniqueRandomSet(max, pick);
+      const candidate = makeUniqueRandomSet(max, pick, rng);
       const key = candidate.join('-');
       if (seen[key] || historicalKeys[key]) continue;
       if (hasExcessiveOverlap(candidate, selected, allowedOverlap)) continue;
@@ -1152,24 +1467,44 @@ function makeConstrainedRandomSet(max, pick, seen, historicalKeys, selected, max
   }
 
   for (let t = 0; t < 1000; t++) {
-    const candidate = makeUniqueRandomSet(max, pick);
+    const candidate = makeUniqueRandomSet(max, pick, rng);
     const key = candidate.join('-');
     if (!seen[key] && !historicalKeys[key]) return candidate;
   }
 
-  return makeUniqueRandomSet(max, pick);
+  return makeUniqueRandomSet(max, pick, rng);
 }
 
-function makeUniqueRandomSet(max, pick) {
+function makeUniqueRandomSet(max, pick, rng) {
   const pool = [];
   for (let n = 1; n <= max; n++) pool.push(n);
   const out = [];
   while (out.length < pick && pool.length) {
-    const idx = Math.floor(Math.random() * pool.length);
+    const idx = Math.floor(randomValue(rng) * pool.length);
     out.push(pool[idx]);
     pool.splice(idx, 1);
   }
   return out.sort(numberAsc);
+}
+
+function randomValue(rng) {
+  return typeof rng === 'function' ? rng() : Math.random();
+}
+
+function createSeededRandom(seed) {
+  let h = 2166136261;
+  seed = String(seed || 'seed');
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return function () {
+    h += 0x6D2B79F5;
+    let t = h;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 /* =========================================================================
