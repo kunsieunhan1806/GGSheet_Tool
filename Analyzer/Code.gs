@@ -33,6 +33,7 @@
 
 const SHEET_NAME     = 'KetQua';
 const COMPARE_SHEET  = 'BoDaSoSanh';
+const BACKTEST_SHEET = 'Backtest';
 
 const HEADERS = [
   'Ngày quay', 'Loại vé',
@@ -298,9 +299,12 @@ function backtestSuggestionMethods(ticketType, options) {
   const draws = getHistoricalResults(ticketType);
   const minTraining = clampInt(options.minTraining, 10, 500, BACKTEST_MIN_TRAINING_DRAWS);
   const setCount = clampInt(options.setCount, 1, 10, SET_COUNT_DEFAULT);
-  const maxTests = clampInt(options.maxTests, 1, 300, BACKTEST_MAX_DRAWS);
+  const maxTests = clampInt(options.maxTests, 1, 60, BACKTEST_MAX_DRAWS);
+  const includeDetails = options.includeDetails !== false;
+  const writeSheet = options.writeSheet === true;
   const methods = ['balanced', 'hot', 'cold', 'random'];
   const stats = {};
+  const detailRows = [];
 
   methods.forEach(function (method) {
     stats[method] = {
@@ -314,27 +318,39 @@ function backtestSuggestionMethods(ticketType, options) {
   });
 
   if (draws.length <= minTraining) {
-    return {
+    const emptyResult = {
       ticketType: ticketType,
       label: cfg.label,
       totalDraws: draws.length,
       testedDraws: 0,
       minTraining: minTraining,
       setCount: setCount,
-      methods: stats
+      methods: stats,
+      details: []
     };
+    if (writeSheet) writeBacktestSheet(emptyResult);
+    return emptyResult;
   }
 
   const start = Math.max(minTraining, draws.length - maxTests);
   for (let i = start; i < draws.length; i++) {
     const training = draws.slice(0, i);
     const actual = draws[i];
+    const drawDetail = includeDetails ? {
+      drawNumber: i + 1,
+      date: actual.date,
+      actualNumbers: (actual.numbers || []).map(Number).sort(numberAsc),
+      actualSpecial: actual.special === null || actual.special === undefined || actual.special === '' ? null : Number(actual.special),
+      methods: {}
+    } : null;
     methods.forEach(function (method) {
       const rng = createSeededRandom(ticketType + '|' + method + '|' + actual.date + '|' + setCount);
       const modelInfo = buildSuggestionModel(training, cfg);
       const profile = buildShapeProfile(training, cfg);
       const historicalKeys = buildHistoricalSetLookup(training);
-      const sets = buildOptimizedPortfolio(modelInfo.model, cfg, method, setCount, historicalKeys, profile, rng);
+      const sets = buildOptimizedPortfolio(modelInfo.model, cfg, method, setCount, historicalKeys, profile, rng, {
+        triesPerSet: method === 'random' ? 80 : 220
+      });
       const details = buildMatchDetails(sets, actual.numbers || []);
       const best = details.reduce(function (max, detail) { return Math.max(max, Number(detail.count) || 0); }, 0);
       const s = stats[method];
@@ -346,7 +362,26 @@ function backtestSuggestionMethods(ticketType, options) {
         s._sumPerSet = (s._sumPerSet || 0) + (Number(detail.count) || 0);
         s._setTotal = (s._setTotal || 0) + 1;
       });
+
+      if (drawDetail) {
+        drawDetail.methods[method] = {
+          bestMatch: best,
+          avgPerSet: details.length ? average(details.map(function (detail) { return Number(detail.count) || 0; })) : 0,
+          sets: details.map(function (detail, idx) {
+            const special = drawDetail.actualSpecial;
+            const set = (detail.set || []).map(Number).sort(numberAsc);
+            return {
+              ticketIndex: idx + 1,
+              set: set,
+              matched: (detail.matched || []).map(Number).sort(numberAsc),
+              count: Number(detail.count) || 0,
+              specialHit: special !== null && set.indexOf(special) >= 0
+            };
+          })
+        };
+      }
     });
+    if (drawDetail) detailRows.push(drawDetail);
   }
 
   Object.keys(stats).forEach(function (method) {
@@ -364,15 +399,103 @@ function backtestSuggestionMethods(ticketType, options) {
     delete s._setTotal;
   });
 
-  return {
+  const result = {
     ticketType: ticketType,
     label: cfg.label,
     totalDraws: draws.length,
     testedDraws: Math.max(0, draws.length - start),
     minTraining: minTraining,
     setCount: setCount,
-    methods: stats
+    methods: stats,
+    details: detailRows
   };
+
+  if (writeSheet) writeBacktestSheet(result);
+  return result;
+}
+
+function writeBacktestSheet(result) {
+  const sheet = getOrCreateBacktestSheet();
+  const methods = ['balanced', 'hot', 'cold', 'random'];
+  const methodLabels = {
+    balanced: 'Cân bằng',
+    hot: 'Số nóng',
+    cold: 'Số nguội',
+    random: 'Ngẫu nhiên'
+  };
+  const rows = [
+    ['Backtest thuật toán gợi ý số'],
+    ['Loại vé', result.label],
+    ['Số kỳ test', result.testedDraws],
+    ['Số vé mỗi kỳ', result.setCount],
+    ['Tổng kỳ lịch sử', result.totalDraws],
+    ['Thời gian xuất', Utilities.formatDate(new Date(), VIETLOTT_TZ, 'yyyy-MM-dd HH:mm:ss')],
+    [],
+    ['Tổng hợp'],
+    ['Phương pháp', 'Số kỳ', 'Vé/kỳ', 'TB mỗi vé', 'Best/phiên TB', 'Có trùng (%)']
+  ];
+
+  methods.forEach(function (method) {
+    const s = result.methods && result.methods[method] ? result.methods[method] : {};
+    rows.push([
+      methodLabels[method] || method,
+      s.testedDraws || 0,
+      result.setCount,
+      s.avgPerSet === null || s.avgPerSet === undefined ? '' : s.avgPerSet,
+      s.avgBestMatch === null || s.avgBestMatch === undefined ? '' : s.avgBestMatch,
+      s.hitRate === null || s.hitRate === undefined ? '' : s.hitRate
+    ]);
+  });
+
+  rows.push([]);
+  rows.push(['Chi tiết vé']);
+  rows.push(['Ngày quay', 'Kết quả thực tế', 'Số ĐB', 'Phương pháp', 'Vé #', 'Bộ số', 'Số trùng', 'Các số trùng', 'Trúng ĐB']);
+
+  (result.details || []).forEach(function (draw) {
+    methods.forEach(function (method) {
+      const methodData = draw.methods && draw.methods[method] ? draw.methods[method] : { sets: [] };
+      (methodData.sets || []).forEach(function (ticket) {
+        rows.push([
+          toVN(draw.date),
+          formatNumberSetForSheet(draw.actualNumbers || []),
+          draw.actualSpecial === null || draw.actualSpecial === undefined ? '' : padNumber2(draw.actualSpecial),
+          methodLabels[method] || method,
+          ticket.ticketIndex,
+          formatNumberSetForSheet(ticket.set || []),
+          ticket.count,
+          formatNumberSetForSheet(ticket.matched || []),
+          ticket.specialHit ? 'Có' : ''
+        ]);
+      });
+    });
+  });
+
+  const width = rows.reduce(function (max, row) { return Math.max(max, row.length); }, 1);
+  const normalized = rows.map(function (row) {
+    const copy = row.slice();
+    while (copy.length < width) copy.push('');
+    return copy;
+  });
+
+  sheet.clear();
+  sheet.getRange(1, 1, normalized.length, width).setValues(normalized);
+  sheet.setFrozenRows(9);
+  sheet.autoResizeColumns(1, width);
+}
+
+function getOrCreateBacktestSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(BACKTEST_SHEET);
+  if (!sheet) sheet = ss.insertSheet(BACKTEST_SHEET);
+  return sheet;
+}
+
+function formatNumberSetForSheet(values) {
+  return (values || []).map(function (n) { return padNumber2(n); }).join(' ');
+}
+
+function padNumber2(value) {
+  return String(Number(value) || 0).padStart(2, '0');
 }
 
 /**
@@ -1184,13 +1307,14 @@ function summarizeModelWindows(windows) {
   });
 }
 
-function buildOptimizedPortfolio(model, cfg, method, count, historicalKeys, shapeProfile, rng) {
+function buildOptimizedPortfolio(model, cfg, method, count, historicalKeys, shapeProfile, rng, optimizerOptions) {
   const selected = [];
   const seen = {};
   const byNumber = {};
   model.forEach(function (it) { byNumber[it.n] = it; });
   historicalKeys = historicalKeys || {};
-  const triesPerSet = method === 'random' ? 250 : 650;
+  optimizerOptions = optimizerOptions || {};
+  const triesPerSet = optimizerOptions.triesPerSet || (method === 'random' ? 250 : 650);
   const maxOverlap = count <= 8 ? 1 : 2;
 
   for (let i = 0; i < count; i++) {

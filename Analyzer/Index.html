@@ -36,6 +36,7 @@
       <button class="tab active" data-tab="generate" role="tab">Gợi ý số</button>
       <button class="tab" data-tab="form" role="tab">Nhập kết quả</button>
       <button class="tab" data-tab="stats" role="tab">Thống kê</button>
+      <button class="tab" data-tab="backtest" role="tab">Backtest</button>
       <button class="tab" data-tab="finance" role="tab">💰 Tài chính</button>
     </nav>
 
@@ -260,15 +261,6 @@
           <p class="compare-subtitle">So sánh bộ số đã copy với kết quả thực tế — chỉ mang tính thống kê giải trí.</p>
           <div class="baseline-card" id="compare-baseline"></div>
 
-          <div class="card backtest-card" id="backtest-card">
-            <div class="card-label">Backtest thuật toán</div>
-            <div class="backtest-actions">
-              <button class="btn" id="btn-backtest" type="button">Chạy backtest</button>
-              <span id="backtest-status"></span>
-            </div>
-            <div class="backtest-grid hidden" id="backtest-grid"></div>
-          </div>
-
           <!-- Method ranking cards -->
           <div id="method-ranking" class="method-ranking hidden">
             <div class="card-label" style="margin-bottom:10px">📊 Hiệu quả theo phương pháp</div>
@@ -295,6 +287,33 @@
         </div>
         <div class="history-list" id="history-list"></div>
         <div id="history-pagination" class="history-pagination hidden"></div>
+      </section>
+
+      <!-- ============ BACKTEST ============ -->
+      <section class="panel hidden" id="panel-backtest" data-panel="backtest">
+        <h2>Backtest <span id="backtest-type-label">Mega 6/45</span></h2>
+
+        <div class="card backtest-card" id="backtest-card">
+          <div class="card-label">Hiệu quả gợi ý số</div>
+          <div class="backtest-controls">
+            <label class="count-field">
+              <span>Số kỳ test</span>
+              <input type="number" id="backtest-draw-count" min="1" max="60" value="30" inputmode="numeric">
+            </label>
+            <label class="count-field">
+              <span>Số vé mỗi kỳ</span>
+              <input type="number" id="backtest-ticket-count" min="1" max="10" value="4" inputmode="numeric">
+            </label>
+            <button class="btn btn-primary" id="btn-backtest" type="button">Chạy backtest</button>
+          </div>
+          <div id="backtest-status" class="backtest-status"></div>
+          <div class="backtest-grid hidden" id="backtest-grid"></div>
+        </div>
+
+        <div class="card backtest-detail-card hidden" id="backtest-detail-card">
+          <div class="card-label">Chi tiết các vé</div>
+          <div class="backtest-detail-list" id="backtest-detail-list"></div>
+        </div>
       </section>
 
       <!-- ============ TÀI CHÍNH ============ -->

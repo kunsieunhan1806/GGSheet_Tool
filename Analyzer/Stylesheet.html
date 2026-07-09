@@ -110,9 +110,11 @@ html, body {
   background: #fff;
   border-bottom: 1px solid var(--gray-200);
   position: sticky; top: 76px; z-index: 9;
+  overflow-x: auto;
 }
 .tab {
-  flex: 1; background: none; border: 0;
+  flex: 0 0 auto; min-width: 92px;
+  background: none; border: 0;
   padding: 13px 8px;
   font-size: 0.92rem; font-weight: 500;
   color: var(--gray-600); cursor: pointer;
@@ -886,6 +888,18 @@ h3.history-title {
   gap: 10px;
   flex-wrap: wrap;
 }
+.backtest-controls {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  align-items: end;
+}
+.backtest-status {
+  min-height: 20px;
+  margin-top: 10px;
+  font-size: 0.78rem;
+  color: var(--gray-500);
+}
 #backtest-status {
   font-size: 0.78rem;
   color: var(--gray-500);
@@ -912,6 +926,90 @@ h3.history-title {
   font-size: 0.75rem;
   color: var(--gray-500);
   line-height: 1.45;
+}
+.backtest-detail-card {
+  margin-top: 12px;
+}
+.backtest-detail-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.backtest-draw {
+  border: 1px solid var(--gray-100);
+  border-radius: var(--radius);
+  background: #fff;
+  padding: 12px;
+}
+.backtest-draw-head {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  align-items: center;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--gray-100);
+}
+.backtest-draw-head b {
+  display: block;
+  color: var(--indigo-800);
+}
+.backtest-draw-head span {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.72rem;
+  color: var(--gray-400);
+}
+.backtest-method-detail {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--gray-100);
+}
+.backtest-method-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--gray-800);
+  font-weight: 700;
+  font-size: 0.84rem;
+  margin-bottom: 8px;
+}
+.backtest-method-title span {
+  color: var(--gray-400);
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+.backtest-ticket {
+  display: grid;
+  grid-template-columns: 42px 1fr 56px;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 0;
+}
+.backtest-ticket + .backtest-ticket {
+  border-top: 1px solid var(--gray-50);
+}
+.backtest-ticket-tag {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--gray-400);
+}
+.backtest-ticket-score {
+  text-align: right;
+  color: var(--gray-600);
+}
+.backtest-ticket-score b {
+  display: block;
+  color: var(--indigo-800);
+}
+.backtest-ticket-score span {
+  display: inline-block;
+  margin-top: 2px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--gold-100);
+  color: var(--gold-600);
+  font-size: 0.68rem;
+  font-weight: 700;
 }
 .mrc-head {
   display: flex; align-items: center;
@@ -1538,7 +1636,7 @@ h3.history-title {
     top: 90px; /* header cao hơn trên desktop */
     box-shadow: 0 2px 8px rgba(28,24,64,.06);
   }
-  .tab { font-size: 0.95rem; padding: 14px 22px; }
+  .tab { flex: 1; min-width: 0; font-size: 0.95rem; padding: 14px 22px; }
 
   /* Chỉ show panel active — KHÔNG show tất cả như cũ */
   .panel.hidden { display: none !important; }
@@ -1550,7 +1648,9 @@ h3.history-title {
   .method-grid { grid-template-columns: repeat(4, 1fr); }
   .stat-cards { grid-template-columns: 1fr 1fr 1fr; }
   .method-rank-grid { grid-template-columns: repeat(4, 1fr); }
+  .backtest-controls { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .backtest-grid { grid-template-columns: repeat(4, 1fr); }
+  .backtest-draw-head { grid-template-columns: minmax(120px, 180px) 1fr; }
   .fin-summary-cards { grid-template-columns: 1fr 1fr 1fr; }
   .fin-method-grid { grid-template-columns: repeat(4, 1fr); }
 }
@@ -1562,16 +1662,19 @@ h3.history-title {
     color: #ece9f5;
   }
   .card, .stat-card, .gen-set, .gen-specials, .history-item, .tabbar, .method-btn,
-  .compare-item, .method-rank-card, .backtest-item, .stats-toolbar {
+  .compare-item, .method-rank-card, .backtest-item, .backtest-draw, .stats-toolbar {
     background: #1d1b35;
     color: #ece9f5;
   }
   .compare-item-head { background: #16142c; border-color: #2c2950; }
   .compare-actual { border-color: #2c2950; }
+  .backtest-draw, .backtest-draw-head, .backtest-method-detail, .backtest-ticket + .backtest-ticket {
+    border-color: #2c2950;
+  }
   .tabbar { border-color: #2c2950; }
   .tab:hover:not(.active) { background: #232145; }
   .card-label, .stat-card-num { color: #ece9f5; }
-  .gen-specials-label, .backtest-item b { color: var(--gold-300); }
+  .gen-specials-label, .backtest-item b, .backtest-draw-head b, .backtest-ticket-score b { color: var(--gold-300); }
   h2, h3.history-title { color: var(--gold-300); }
   .compare-title { color: var(--gold-300); }
   .method-btn { border-color: #2c2950; }

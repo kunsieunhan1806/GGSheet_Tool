@@ -172,6 +172,7 @@
       syncRangeHint();
       setDrawDateDefault();
       clearGenerated();
+      clearBacktest();
       historyPage = 1;
       load();
     });
@@ -346,6 +347,8 @@
   function render() {
     $('#gen-type-label').textContent   = state.label;
     $('#stats-type-label').textContent = state.label;
+    const backtestType = $('#backtest-type-label');
+    if (backtestType) backtestType.textContent = state.label;
     renderStats();
     renderHistory();
   }
@@ -785,18 +788,50 @@
     backtestBtn.addEventListener('click', runBacktest);
   }
 
+  function clearBacktest() {
+    const status = $('#backtest-status');
+    const grid = $('#backtest-grid');
+    const detailCard = $('#backtest-detail-card');
+    const detailList = $('#backtest-detail-list');
+    if (status) status.textContent = '';
+    if (grid) {
+      grid.innerHTML = '';
+      grid.classList.add('hidden');
+    }
+    if (detailList) detailList.innerHTML = '';
+    if (detailCard) detailCard.classList.add('hidden');
+  }
+
   function runBacktest() {
     const status = $('#backtest-status');
     const grid = $('#backtest-grid');
-    const backtestSetCount = Math.min(readSetCount(), 4);
+    const detailCard = $('#backtest-detail-card');
+    const maxTests = readBacktestNumber('#backtest-draw-count', 1, 60, 30);
+    const backtestSetCount = readBacktestNumber('#backtest-ticket-count', 1, 10, 4);
     if (status) status.textContent = 'Đang chạy...';
     if (grid) grid.classList.add('hidden');
+    if (detailCard) detailCard.classList.add('hidden');
     google.script.run
       .withSuccessHandler(res => renderBacktest(res))
       .withFailureHandler(err => {
         if (status) status.textContent = 'Lỗi: ' + (err && err.message ? err.message : String(err));
       })
-      .backtestSuggestionMethods(ticketType, { setCount: backtestSetCount, maxTests: 30, minTraining: 30 });
+      .backtestSuggestionMethods(ticketType, {
+        setCount: backtestSetCount,
+        maxTests: maxTests,
+        minTraining: 30,
+        includeDetails: true,
+        writeSheet: true
+      });
+  }
+
+  function readBacktestNumber(selector, min, max, fallback) {
+    const input = $(selector);
+    let value = input ? parseInt(input.value, 10) : fallback;
+    if (isNaN(value)) value = fallback;
+    value = Math.max(min, Math.min(max, value));
+    if (input) input.value = value;
+    return value;
   }
 
   function renderBacktest(res) {
@@ -806,11 +841,12 @@
     const methods = res.methods || {};
     const tested = Number(res.testedDraws) || 0;
     status.textContent = tested
-      ? ('Đã test ' + tested + ' kỳ gần nhất, mỗi kỳ ' + res.setCount + ' bộ')
+      ? ('Đã test ' + tested + ' kỳ gần nhất, mỗi kỳ ' + res.setCount + ' vé. Đã ghi chi tiết vào sheet Backtest.')
       : ('Cần ít nhất ' + res.minTraining + ' kỳ lịch sử để backtest');
     grid.innerHTML = '';
     if (!tested) {
       grid.classList.add('hidden');
+      renderBacktestDetails(res);
       return;
     }
     const baseline = randomMatchBaseline();
@@ -834,6 +870,74 @@
       grid.appendChild(item);
     });
     grid.classList.remove('hidden');
+    renderBacktestDetails(res);
+  }
+
+  function renderBacktestDetails(res) {
+    const card = $('#backtest-detail-card');
+    const list = $('#backtest-detail-list');
+    if (!card || !list) return;
+    const details = res.details || [];
+    list.innerHTML = '';
+    if (!details.length) {
+      card.classList.add('hidden');
+      return;
+    }
+
+    details.slice().reverse().forEach(draw => {
+      const item = document.createElement('div');
+      item.className = 'backtest-draw';
+
+      const head = document.createElement('div');
+      head.className = 'backtest-draw-head';
+      const actualBalls = document.createElement('div');
+      actualBalls.className = 'gen-balls';
+      (draw.actualNumbers || []).forEach(n => actualBalls.appendChild(ball(n, true)));
+      if (draw.actualSpecial !== null && draw.actualSpecial !== undefined) {
+        const sep = document.createElement('span');
+        sep.className = 'ball-sep';
+        sep.textContent = '+';
+        actualBalls.appendChild(sep);
+        actualBalls.appendChild(ball(draw.actualSpecial, true, true));
+      }
+      head.innerHTML = '<b>' + fmtVN(draw.date) + '</b><span>Kỳ lịch sử #' + draw.drawNumber + '</span>';
+      head.appendChild(actualBalls);
+      item.appendChild(head);
+
+      ['balanced','hot','cold','random'].forEach(method => {
+        const methodData = draw.methods && draw.methods[method] ? draw.methods[method] : null;
+        if (!methodData) return;
+        const meta = METHOD_META[method] || { icon:'', label:method };
+        const group = document.createElement('div');
+        group.className = 'backtest-method-detail';
+        group.innerHTML = '<div class="backtest-method-title">' + meta.icon + ' ' + escapeHtml(meta.label)
+          + '<span>best ' + methodData.bestMatch + ' · TB ' + Number(methodData.avgPerSet || 0).toFixed(2) + '</span></div>';
+
+        (methodData.sets || []).forEach(ticket => {
+          const row = document.createElement('div');
+          row.className = 'backtest-ticket';
+          const tag = document.createElement('div');
+          tag.className = 'backtest-ticket-tag';
+          tag.textContent = '#' + ticket.ticketIndex;
+          const balls = document.createElement('div');
+          balls.className = 'gen-balls';
+          const matched = {};
+          (ticket.matched || []).forEach(n => { matched[n] = true; });
+          (ticket.set || []).forEach(n => balls.appendChild(ball(n, true, false, !!matched[n])));
+          const score = document.createElement('div');
+          score.className = 'backtest-ticket-score';
+          score.innerHTML = '<b>' + ticket.count + '/6</b>' + (ticket.specialHit ? '<span>ĐB</span>' : '');
+          row.appendChild(tag);
+          row.appendChild(balls);
+          row.appendChild(score);
+          group.appendChild(row);
+        });
+        item.appendChild(group);
+      });
+
+      list.appendChild(item);
+    });
+    card.classList.remove('hidden');
   }
 
   function renderComparison() {
