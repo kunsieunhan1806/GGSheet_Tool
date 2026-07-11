@@ -24,6 +24,8 @@
  *  H: Chi tiết trùng (JSON: [{set:[...], matched:[...], count:n}])
  *  I: Jackpot (JSON: {j1:amount, j2:amount} — nhập tay, chỉ khi trúng jackpot)
  *  J: Giải thưởng (JSON: [{setIdx, label, prize}] — tính tự động khi so sánh)
+ *  K: Phiên bản thuật toán
+ *  L: Seed tái lập bộ số
  *
  * ⚠ LƯU Ý QUAN TRỌNG:
  *  Kết quả xổ số là NGẪU NHIÊN và ĐỘC LẬP — mỗi lần quay không phụ thuộc
@@ -46,7 +48,9 @@ const COMPARE_HEADERS = [
   'Ngày KQ so sánh', 'Kết quả thực (JSON)',
   'Số trùng tốt nhất', 'Chi tiết trùng (JSON)',
   'Jackpot (JSON)',      // I: { j1:amount, j2:amount } — nhập tay khi trúng
-  'Giải thưởng (JSON)'  // J: [{prize, label, setIdx}] — tính tự động
+  'Giải thưởng (JSON)', // J: [{prize, label, setIdx}] — tính tự động
+  'Thuật toán',          // K: phiên bản thuật toán tạo bộ
+  'Seed'                 // L: seed để tái lập bộ số
 ];
 
 // Giá vé và bảng giải thưởng
@@ -67,16 +71,19 @@ const TYPES = {
 const DEFAULT_TYPE      = '6/45';
 const MAIN              = 6;   // giữ cho backward compat, dùng cfg.main khi cần
 const PICK              = 6;   // giữ cho backward compat
-const SET_COUNT_DEFAULT = 4;
-const SET_COUNT_MAX     = 50;
+const SET_COUNT_DEFAULT = 100;
+const SET_COUNT_MAX     = 100;
+const BACKTEST_SET_COUNT_DEFAULT = 4;
+const ALGORITHM_VERSION = 'blend-v2.0';
+const OPTIMIZER_TRIES_WEIGHTED = 180;
 const SUGGESTION_WINDOWS = [
-  { key: 'all', label: 'tất cả kỳ', weight: 0.50, limit: null },
-  { key: '50',  label: '50 kỳ gần nhất', weight: 0.30, limit: 50 },
-  { key: '20',  label: '20 kỳ gần nhất', weight: 0.20, limit: 20 }
+  // Ba nhóm không chồng lấp để một kỳ quay không bị đếm lại 2–3 lần.
+  { key: 'long',   label: 'lịch sử trước 50 kỳ gần nhất', weight: 0.55, offset: 50, limit: null },
+  { key: 'mid',    label: 'kỳ 21–50 gần nhất',            weight: 0.25, offset: 20, limit: 30 },
+  { key: 'recent', label: '20 kỳ gần nhất',               weight: 0.20, offset: 0,  limit: 20 }
 ];
-const SPECIAL_SIGNAL_WEIGHT = 0.08;
-const BACKTEST_MIN_TRAINING_DRAWS = 30;
-const BACKTEST_MAX_DRAWS = 30;
+const BACKTEST_MIN_TRAINING_DRAWS = 100;
+const BACKTEST_MAX_DRAWS = 60;
 
 const VIETLOTT_URLS = {
   '6/45': 'https://vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/645',
@@ -127,8 +134,8 @@ function doGet() {
   return HtmlService.createTemplateFromFile('Index')
     .evaluate()
     .setTitle('Phân tích số Vietlott — 6/45 · 6/55')
-    .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1')
-    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.DEFAULT);
 }
 
 function include(filename) {
@@ -153,7 +160,8 @@ function getData(ticketType) {
     const values = sheet.getRange(2, 1, lastRow - 1, HEADERS.length).getValues();
     values.forEach(function (row, idx) {
       if (!(row[0] instanceof Date)) return;
-      const type = normalizeType(row[1]);
+      const type = parseStoredTicketType(row[1]);
+      if (!type) return;
       if (type !== ticketType) return;
 
       const mainCount = cfg.main || 6;
@@ -276,7 +284,9 @@ function generateNumbers(ticketType, method, count) {
   const model = modelInfo.model;
   const historicalKeys = buildHistoricalSetLookup(draws);
   const shapeProfile = buildShapeProfile(draws, cfg);
-  const sets = buildOptimizedPortfolio(model, cfg, method, setCount, historicalKeys, shapeProfile);
+  const seed = ticketType + '|' + method + '|' + new Date().getTime() + '|' + Math.random();
+  const rng = createSeededRandom(seed);
+  const sets = buildPortfolioForMethod(model, cfg, method, setCount, historicalKeys, shapeProfile, rng);
 
   return {
     ticketType: ticketType,
@@ -286,19 +296,22 @@ function generateNumbers(ticketType, method, count) {
     pick: cfg.pick || 6,
     totalDraws: draws.length,
     modelWindows: modelInfo.windows,
-    algorithm: 'blend-v1',
+    algorithm: ALGORITHM_VERSION,
+    seed: seed,
+    dataAudit: draws.audit || { invalidRows: 0, duplicateRows: 0 },
     sets: sets,
-    specials: buildSpecialSuggestions(modelInfo.specialModel, method, setCount)
+    specials: buildSpecialSuggestions(modelInfo.specialModel, method, setCount, rng)
   };
 }
 
-function backtestSuggestionMethods(ticketType, options) {
+// Legacy runner giữ để tham chiếu định dạng cũ; UI không gọi hàm này.
+function backtestSuggestionMethodsLegacyRunner(ticketType, options) {
   ticketType = normalizeType(ticketType);
   options = options || {};
   const cfg = TYPES[ticketType];
   const draws = getHistoricalResults(ticketType);
   const minTraining = clampInt(options.minTraining, 10, 500, BACKTEST_MIN_TRAINING_DRAWS);
-  const setCount = clampInt(options.setCount, 1, 10, SET_COUNT_DEFAULT);
+  const setCount = clampInt(options.setCount, 1, 10, BACKTEST_SET_COUNT_DEFAULT);
   const maxTests = clampInt(options.maxTests, 1, 60, BACKTEST_MAX_DRAWS);
   const includeDetails = options.includeDetails !== false;
   const writeSheet = options.writeSheet === true;
@@ -414,6 +427,229 @@ function backtestSuggestionMethods(ticketType, options) {
   return result;
 }
 
+/**
+ * Walk-forward backtest dùng đúng core đang dùng khi tạo vé.
+ * "random" là đối chứng đồng đều thuần, không chạm shape/lịch sử.
+ */
+function backtestSuggestionMethods(ticketType, options) {
+  ticketType = normalizeType(ticketType);
+  options = options || {};
+  const cfg = TYPES[ticketType];
+  const draws = getHistoricalResults(ticketType);
+  const minTraining = clampInt(options.minTraining, 10, 500, BACKTEST_MIN_TRAINING_DRAWS);
+  const setCount = clampInt(options.setCount, 1, 10, BACKTEST_SET_COUNT_DEFAULT);
+  const maxTests = clampInt(options.maxTests, 1, 60, BACKTEST_MAX_DRAWS);
+  const includeDetails = options.includeDetails !== false;
+  const writeSheet = options.writeSheet === true;
+  const methods = ['balanced', 'hot', 'cold', 'random'];
+  const stats = {};
+  const detailRows = [];
+  methods.forEach(function (method) { stats[method] = createBacktestStats(setCount); });
+
+  const start = draws.length > minTraining ? Math.max(minTraining, draws.length - maxTests) : draws.length;
+  for (let i = start; i < draws.length; i++) {
+    const training = draws.slice(0, i);
+    const actual = draws[i];
+    // Ba khối này không phụ thuộc method; tính một lần/fold để backtest nhanh và đúng parity.
+    const modelInfo = buildSuggestionModel(training, cfg);
+    const profile = buildShapeProfile(training, cfg);
+    const historicalKeys = buildHistoricalSetLookup(training);
+    const drawDetail = includeDetails ? {
+      drawNumber: i + 1,
+      date: actual.date,
+      actualNumbers: (actual.numbers || []).map(Number).sort(numberAsc),
+      actualSpecial: actual.special === null || actual.special === undefined || actual.special === '' ? null : Number(actual.special),
+      methods: {}
+    } : null;
+
+    methods.forEach(function (method) {
+      const rng = createSeededRandom(ALGORITHM_VERSION + '|' + ticketType + '|' + method + '|' + actual.date + '|' + setCount);
+      const sets = buildPortfolioForMethod(modelInfo.model, cfg, method, setCount, historicalKeys, profile, rng);
+      const details = buildMatchDetails(sets, actual.numbers || []);
+      const counts = details.map(function (detail) { return Number(detail.count) || 0; });
+      const best = counts.reduce(function (max, value) { return Math.max(max, value); }, 0);
+      const portfolio = computePortfolioMetrics(sets);
+      updateBacktestStats(stats[method], counts, best, portfolio, ticketType, sets, drawDetail && drawDetail.actualSpecial);
+
+      if (drawDetail) {
+        drawDetail.methods[method] = {
+          bestMatch: best,
+          avgPerSet: counts.length ? average(counts) : 0,
+          coverage: portfolio.coverage,
+          avgPairOverlap: portfolio.avgPairOverlap,
+          sets: details.map(function (detail, idx) {
+            const special = drawDetail.actualSpecial;
+            const set = (detail.set || []).map(Number).sort(numberAsc);
+            const specialHit = special !== null && set.indexOf(special) >= 0;
+            return {
+              ticketIndex: idx + 1,
+              set: set,
+              matched: (detail.matched || []).map(Number).sort(numberAsc),
+              count: Number(detail.count) || 0,
+              specialHit: specialHit,
+              jackpot2Hit: ticketType === '6/55' && Number(detail.count) === 5 && specialHit
+            };
+          })
+        };
+      }
+    });
+    if (drawDetail) detailRows.push(drawDetail);
+  }
+
+  methods.forEach(function (method) { finalizeBacktestStats(stats[method], cfg); });
+  const randomDrawAverages = stats.random._drawAverages || [];
+  methods.forEach(function (method) {
+    const paired = pairedDeltaSummary(stats[method]._drawAverages || [], randomDrawAverages);
+    stats[method].deltaVsRandom = paired.mean;
+    stats[method].deltaVsRandomCi95 = paired.ci95;
+    delete stats[method]._drawAverages;
+  });
+
+  const result = {
+    ticketType: ticketType,
+    label: cfg.label,
+    algorithm: ALGORITHM_VERSION,
+    totalDraws: draws.length,
+    testedDraws: Math.max(0, draws.length - start),
+    minTraining: minTraining,
+    setCount: setCount,
+    randomExpectedPerTicket: roundMetric((cfg.pick || 6) * (cfg.main || 6) / cfg.max, 4),
+    dataAudit: draws.audit || { invalidRows: 0, duplicateRows: 0 },
+    methods: stats,
+    details: detailRows
+  };
+
+  if (writeSheet) writeBacktestSheet(result);
+  return result;
+}
+
+function createBacktestStats(setCount) {
+  return {
+    testedDraws: 0,
+    setCount: setCount,
+    avgBestMatch: null,
+    avgPerSet: null,
+    avgPerSetCi95: null,
+    hitRate: null,
+    bestGe2Rate: null,
+    bestGe3Rate: null,
+    ticketHitRate: null,
+    ticketGe2Rate: null,
+    ticketGe3Rate: null,
+    avgCoverage: null,
+    avgPairOverlap: null,
+    fixedRoiPct: null,
+    jackpot2Hits: 0,
+    dist: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 },
+    ticketDist: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 },
+    _sumBest: 0,
+    _sumPerSet: 0,
+    _setTotal: 0,
+    _bestGe1: 0,
+    _bestGe2: 0,
+    _bestGe3: 0,
+    _ticketGe1: 0,
+    _ticketGe2: 0,
+    _ticketGe3: 0,
+    _sumCoverage: 0,
+    _sumPairOverlap: 0,
+    _sumFixedPrize: 0,
+    _drawAverages: []
+  };
+}
+
+function updateBacktestStats(stats, counts, best, portfolio, ticketType, sets, actualSpecial) {
+  stats.testedDraws += 1;
+  stats._sumBest += best;
+  stats._bestGe1 += best >= 1 ? 1 : 0;
+  stats._bestGe2 += best >= 2 ? 1 : 0;
+  stats._bestGe3 += best >= 3 ? 1 : 0;
+  stats.dist[best] = (stats.dist[best] || 0) + 1;
+  stats._sumCoverage += portfolio.coverage;
+  stats._sumPairOverlap += portfolio.avgPairOverlap;
+  stats._drawAverages.push(counts.length ? average(counts) : 0);
+
+  counts.forEach(function (count, idx) {
+    stats._sumPerSet += count;
+    stats._setTotal += 1;
+    stats._ticketGe1 += count >= 1 ? 1 : 0;
+    stats._ticketGe2 += count >= 2 ? 1 : 0;
+    stats._ticketGe3 += count >= 3 ? 1 : 0;
+    stats.ticketDist[count] = (stats.ticketDist[count] || 0) + 1;
+    stats._sumFixedPrize += Number((PRIZE_TABLE[ticketType] || {})[count]) || 0;
+    if (ticketType === '6/55' && count === 5 && actualSpecial !== null && actualSpecial !== undefined) {
+      if ((sets[idx] || []).indexOf(Number(actualSpecial)) >= 0) stats.jackpot2Hits += 1;
+    }
+  });
+}
+
+function finalizeBacktestStats(stats, cfg) {
+  const drawCount = stats.testedDraws;
+  const ticketCount = stats._setTotal;
+  const expected = (cfg.pick || 6) * (cfg.main || 6) / cfg.max;
+  const summary = meanAndCi95(stats._drawAverages);
+  if (drawCount > 0) {
+    stats.avgBestMatch = roundMetric(stats._sumBest / drawCount, 3);
+    stats.hitRate = roundMetric(stats._bestGe1 / drawCount * 100, 1);
+    stats.bestGe2Rate = roundMetric(stats._bestGe2 / drawCount * 100, 1);
+    stats.bestGe3Rate = roundMetric(stats._bestGe3 / drawCount * 100, 1);
+    stats.avgCoverage = roundMetric(stats._sumCoverage / drawCount, 2);
+    stats.avgPairOverlap = roundMetric(stats._sumPairOverlap / drawCount, 3);
+  }
+  if (ticketCount > 0) {
+    stats.avgPerSet = roundMetric(stats._sumPerSet / ticketCount, 3);
+    stats.avgPerSetCi95 = summary.ci95;
+    stats.deltaVsExpected = roundMetric(stats.avgPerSet - expected, 3);
+    stats.ticketHitRate = roundMetric(stats._ticketGe1 / ticketCount * 100, 1);
+    stats.ticketGe2Rate = roundMetric(stats._ticketGe2 / ticketCount * 100, 1);
+    stats.ticketGe3Rate = roundMetric(stats._ticketGe3 / ticketCount * 100, 1);
+    stats.fixedRoiPct = roundMetric((stats._sumFixedPrize / ticketCount - TICKET_PRICE) / TICKET_PRICE * 100, 1);
+  }
+  ['_sumBest','_sumPerSet','_setTotal','_bestGe1','_bestGe2','_bestGe3',
+    '_ticketGe1','_ticketGe2','_ticketGe3','_sumCoverage','_sumPairOverlap','_sumFixedPrize']
+    .forEach(function (key) { delete stats[key]; });
+}
+
+function computePortfolioMetrics(sets) {
+  const unique = {};
+  const overlaps = [];
+  (sets || []).forEach(function (set, idx) {
+    (set || []).forEach(function (n) { unique[n] = true; });
+    for (let j = 0; j < idx; j++) overlaps.push(countOverlap(set, sets[j]));
+  });
+  return {
+    coverage: Object.keys(unique).length,
+    avgPairOverlap: overlaps.length ? average(overlaps) : 0
+  };
+}
+
+function pairedDeltaSummary(values, baseline) {
+  const length = Math.min(values.length, baseline.length);
+  const diffs = [];
+  for (let i = 0; i < length; i++) diffs.push((Number(values[i]) || 0) - (Number(baseline[i]) || 0));
+  return meanAndCi95(diffs);
+}
+
+function meanAndCi95(values) {
+  values = (values || []).map(Number).filter(function (value) { return !isNaN(value); });
+  if (!values.length) return { mean: null, ci95: null };
+  const mean = average(values);
+  if (values.length < 2) return { mean: roundMetric(mean, 3), ci95: null };
+  const variance = values.reduce(function (sum, value) {
+    return sum + Math.pow(value - mean, 2);
+  }, 0) / (values.length - 1);
+  return {
+    mean: roundMetric(mean, 3),
+    ci95: roundMetric(1.96 * Math.sqrt(variance / values.length), 3)
+  };
+}
+
+function roundMetric(value, digits) {
+  if (value === null || value === undefined || isNaN(Number(value))) return null;
+  const factor = Math.pow(10, digits === undefined ? 3 : digits);
+  return Math.round(Number(value) * factor) / factor;
+}
+
 function writeBacktestSheet(result) {
   const sheet = getOrCreateBacktestSheet();
   const methods = ['balanced', 'hot', 'cold', 'random'];
@@ -421,18 +657,22 @@ function writeBacktestSheet(result) {
     balanced: 'Cân bằng',
     hot: 'Số nóng',
     cold: 'Số nguội',
-    random: 'Ngẫu nhiên'
+    random: 'Ngẫu nhiên thuần'
   };
   const rows = [
     ['Backtest thuật toán gợi ý số'],
     ['Loại vé', result.label],
+    ['Thuật toán', result.algorithm || ALGORITHM_VERSION],
     ['Số kỳ test', result.testedDraws],
     ['Số vé mỗi kỳ', result.setCount],
     ['Tổng kỳ lịch sử', result.totalDraws],
+    ['Baseline kỳ vọng / vé', result.randomExpectedPerTicket],
+    ['Dòng dữ liệu bỏ qua', ((result.dataAudit || {}).invalidRows || 0) + ((result.dataAudit || {}).duplicateRows || 0)],
     ['Thời gian xuất', Utilities.formatDate(new Date(), VIETLOTT_TZ, 'yyyy-MM-dd HH:mm:ss')],
     [],
     ['Tổng hợp'],
-    ['Phương pháp', 'Số kỳ', 'Vé/kỳ', 'TB mỗi vé', 'Best/phiên TB', 'Có trùng (%)']
+    ['Phương pháp', 'Số kỳ', 'Vé/kỳ', 'TB mỗi vé', '± CI95', 'Δ kỳ vọng', 'Δ random', '± CI random',
+      'Best/phiên TB', 'Best ≥2 (%)', 'Best ≥3 (%)', 'Vé ≥3 (%)', 'Độ phủ', 'Overlap TB', 'ROI cố định (%)']
   ];
 
   methods.forEach(function (method) {
@@ -442,14 +682,23 @@ function writeBacktestSheet(result) {
       s.testedDraws || 0,
       result.setCount,
       s.avgPerSet === null || s.avgPerSet === undefined ? '' : s.avgPerSet,
+      s.avgPerSetCi95 === null || s.avgPerSetCi95 === undefined ? '' : s.avgPerSetCi95,
+      s.deltaVsExpected === null || s.deltaVsExpected === undefined ? '' : s.deltaVsExpected,
+      s.deltaVsRandom === null || s.deltaVsRandom === undefined ? '' : s.deltaVsRandom,
+      s.deltaVsRandomCi95 === null || s.deltaVsRandomCi95 === undefined ? '' : s.deltaVsRandomCi95,
       s.avgBestMatch === null || s.avgBestMatch === undefined ? '' : s.avgBestMatch,
-      s.hitRate === null || s.hitRate === undefined ? '' : s.hitRate
+      s.bestGe2Rate === null || s.bestGe2Rate === undefined ? '' : s.bestGe2Rate,
+      s.bestGe3Rate === null || s.bestGe3Rate === undefined ? '' : s.bestGe3Rate,
+      s.ticketGe3Rate === null || s.ticketGe3Rate === undefined ? '' : s.ticketGe3Rate,
+      s.avgCoverage === null || s.avgCoverage === undefined ? '' : s.avgCoverage,
+      s.avgPairOverlap === null || s.avgPairOverlap === undefined ? '' : s.avgPairOverlap,
+      s.fixedRoiPct === null || s.fixedRoiPct === undefined ? '' : s.fixedRoiPct
     ]);
   });
 
   rows.push([]);
   rows.push(['Chi tiết vé']);
-  rows.push(['Ngày quay', 'Kết quả thực tế', 'Số ĐB', 'Phương pháp', 'Vé #', 'Bộ số', 'Số trùng', 'Các số trùng', 'Trúng ĐB']);
+  rows.push(['Ngày quay', 'Kết quả thực tế', 'Số ĐB', 'Phương pháp', 'Vé #', 'Bộ số', 'Số trùng', 'Các số trùng', 'Chứa SĐB', 'Jackpot 2']);
 
   (result.details || []).forEach(function (draw) {
     methods.forEach(function (method) {
@@ -464,7 +713,8 @@ function writeBacktestSheet(result) {
           formatNumberSetForSheet(ticket.set || []),
           ticket.count,
           formatNumberSetForSheet(ticket.matched || []),
-          ticket.specialHit ? 'Có' : ''
+          ticket.specialHit ? 'Có' : '',
+          ticket.jackpot2Hit ? 'Có' : ''
         ]);
       });
     });
@@ -479,7 +729,7 @@ function writeBacktestSheet(result) {
 
   sheet.clear();
   sheet.getRange(1, 1, normalized.length, width).setValues(normalized);
-  sheet.setFrozenRows(9);
+  sheet.setFrozenRows(12);
   sheet.autoResizeColumns(1, width);
 }
 
@@ -506,6 +756,8 @@ function saveGeneratedSets(payload) {
   const type = normalizeType(payload.ticketType || payload.type);
   const cfg = TYPES[type];
   const method = normalizeMethod(payload.method);
+  const algorithm = String(payload.algorithm || ALGORITHM_VERSION);
+  const seed = String(payload.seed || '');
   const drawDate = parseIso(payload.drawDate);
   if (!drawDate) throw new Error('Ngày quay dự kiến không hợp lệ.');
 
@@ -539,7 +791,9 @@ function saveGeneratedSets(payload) {
     '',
     '',
     '',
-    ''
+    '',
+    algorithm,
+    seed
   ]]);
 
   const actual = findActualResult(drawDate, type);
@@ -854,7 +1108,7 @@ function fetchVietlottResult(type) {
   try {
     return fetchFallbackResult(type);
   } catch (fallbackErr) {
-    errors.push('MinhNgoc fallback: ' + (fallbackErr && fallbackErr.message ? fallbackErr.message : String(fallbackErr)));
+    errors.push('Minh Ngọc fallback: ' + (fallbackErr && fallbackErr.message ? fallbackErr.message : String(fallbackErr)));
   }
 
   const detail = errors.join(' | ');
@@ -876,7 +1130,7 @@ function fetchVietlottAjaxResult(type) {
   const renderInfoJson = parseJsonSafe(renderInfoResponse.getContentText('UTF-8'), null);
   const renderInfo = renderInfoJson && renderInfoJson.value;
   if (!renderInfo) {
-    throw new Error('không đọc được render-info.');
+    throw new Error('Không đọc được render-info.');
   }
 
   const detailResponse = UrlFetchApp.fetch(VIETLOTT_AJAX.detail[type], getVietlottAjaxOptions(
@@ -951,7 +1205,7 @@ function shortenVietlottUrl(url) {
 
 function fetchFallbackResult(type) {
   const url = RESULT_FALLBACK_URLS[type];
-  if (!url) throw new Error('không có nguồn fallback cho ' + type + '.');
+  if (!url) throw new Error('Không có nguồn fallback cho ' + type + '.');
 
   const response = UrlFetchApp.fetch(url, getVietlottFetchOptions(url));
   const code = response.getResponseCode();
@@ -1136,30 +1390,31 @@ function buildSpecialNumberModel(stats) {
 
 function buildWeightedNumberModel(stats, expectedFreq) {
   const numbers = stats.numbers || [];
-  const maxFreq = numbers.reduce(function (m, it) { return Math.max(m, it.freq); }, 0) || 1;
-  const maxGap = numbers.reduce(function (m, it) { return Math.max(m, it.gap); }, 0) || 1;
+  const totalDraws = Math.max(0, Number(stats.totalDraws) || 0);
+  const probability = Number(stats.probability)
+    || (totalDraws > 0 ? expectedFreq / totalDraws : 0)
+    || (stats.max ? 1 / Number(stats.max) : 0);
+  // Beta/Binomial shrinkage: cửa sổ ngắn được kéo mạnh về xác suất đồng đều.
+  // Nhờ vậy 1–2 lần xuất hiện bất thường trong 20 kỳ không chi phối danh mục vé.
+  const priorDraws = Math.max(80, (Number(stats.max) || numbers.length || 45) * 2);
+  const reliability = Math.min(1, totalDraws / 250);
 
   return numbers.map(function (it) {
-    const freqNorm = it.freq / maxFreq;
-    const coldNorm = it.gap / maxGap;
-    const underNorm = expectedFreq > 0 ? Math.max(0, expectedFreq - it.freq) / Math.max(1, expectedFreq) : coldNorm;
-    const recencyNorm = it.gap === 0 ? 1 : 1 / (1 + it.gap);
+    const posteriorRate = (Number(it.freq || 0) + priorDraws * probability) / Math.max(1, totalDraws + priorDraws);
+    const relativeEdge = probability > 0 ? (posteriorRate - probability) / probability : 0;
+    const calibratedEdge = Math.max(-0.22, Math.min(0.22, relativeEdge * reliability));
     const zScore = Number(it.zScore) || 0;
-    const hotSignal = Math.max(0, Math.min(1, zScore / 3));
-    const coldSignal = Math.max(0, Math.min(1, -zScore / 3));
-    const balancedScore = 0.45 * freqNorm + 0.35 * coldNorm + 0.20 * underNorm;
     return {
       n: it.n,
       freq: it.freq,
       gap: it.gap,
       zScore: zScore,
-      freqNorm: freqNorm,
-      coldNorm: coldNorm,
-      underNorm: underNorm,
-      recencyNorm: recencyNorm,
-      hotWeight: 0.35 + 0.45 * hotSignal + 0.15 * freqNorm + 0.05 * recencyNorm,
-      coldWeight: 0.35 + 0.45 * coldSignal + 0.15 * coldNorm + 0.05 * underNorm,
-      balancedWeight: 0.15 + balancedScore,
+      posteriorRate: posteriorRate,
+      calibratedEdge: calibratedEdge,
+      // Khoảng trọng số hẹp có chủ ý: ưu tiên bằng chứng ổn định, không "đuổi" gap.
+      hotWeight: Math.exp(2.0 * calibratedEdge),
+      coldWeight: Math.exp(-1.4 * calibratedEdge),
+      balancedWeight: Math.exp(1.15 * calibratedEdge),
       randomWeight: 1
     };
   });
@@ -1175,7 +1430,6 @@ function buildSuggestionModel(draws, cfg) {
     const hasSpecialData = specialWindows.some(function (w) { return w.totalDraws > 0; });
     if (hasSpecialData) {
       specialModel = blendWindowModels(specialWindows, cfg.max);
-      model = applySpecialSignalToMainModel(model, specialModel);
     }
   }
 
@@ -1189,7 +1443,9 @@ function buildSuggestionModel(draws, cfg) {
 function buildWindowModels(draws, cfg, specialOnly) {
   draws = draws || [];
   return normalizeWindowWeights(SUGGESTION_WINDOWS.map(function (def) {
-    const subset = def.limit ? draws.slice(Math.max(0, draws.length - def.limit)) : draws.slice();
+    const end = Math.max(0, draws.length - (def.offset || 0));
+    const start = def.limit ? Math.max(0, end - def.limit) : 0;
+    const subset = draws.slice(start, end);
     const stats = specialOnly
       ? computeSpecialStats(subset, cfg.max)
       : computeStats(subset, cfg.max, cfg.main || 6);
@@ -1272,28 +1528,23 @@ function blendWindowModels(windows, max) {
   return out;
 }
 
-function applySpecialSignalToMainModel(model, specialModel) {
-  const specialByNumber = {};
-  (specialModel || []).forEach(function (it) { specialByNumber[it.n] = it; });
-  return (model || []).map(function (it) {
-    const sp = specialByNumber[it.n];
-    if (!sp) return it;
-    const mainWeight = 1 - SPECIAL_SIGNAL_WEIGHT;
-    return Object.assign({}, it, {
-      specialZScore: sp.zScore,
-      hotWeight: it.hotWeight * mainWeight + sp.hotWeight * SPECIAL_SIGNAL_WEIGHT,
-      coldWeight: it.coldWeight * mainWeight + sp.coldWeight * SPECIAL_SIGNAL_WEIGHT,
-      balancedWeight: it.balancedWeight * mainWeight + sp.balancedWeight * SPECIAL_SIGNAL_WEIGHT
-    });
-  });
-}
-
-function buildSpecialSuggestions(specialModel, method, count) {
+function buildSpecialSuggestions(specialModel, method, count, rng) {
   if (!specialModel || !specialModel.length) return [];
-  const key = (method === 'random' ? 'balanced' : method) + 'Weight';
+  const limit = Math.min(6, Math.max(1, count || 4));
+  if (method === 'random') {
+    const pool = specialModel.map(function (it) { return it.n; });
+    const out = [];
+    while (out.length < limit && pool.length) {
+      const idx = Math.floor(randomValue(rng) * pool.length);
+      out.push(pool[idx]);
+      pool.splice(idx, 1);
+    }
+    return out.sort(numberAsc);
+  }
+  const key = method + 'Weight';
   return specialModel.slice().sort(function (a, b) {
     return (Number(b[key]) - Number(a[key])) || (Math.abs(b.zScore) - Math.abs(a.zScore)) || (a.n - b.n);
-  }).slice(0, Math.min(6, Math.max(1, count || 4))).map(function (it) { return it.n; });
+  }).slice(0, limit).map(function (it) { return it.n; });
 }
 
 function summarizeModelWindows(windows) {
@@ -1307,28 +1558,62 @@ function summarizeModelWindows(windows) {
   });
 }
 
+function buildPortfolioForMethod(model, cfg, method, count, historicalKeys, shapeProfile, rng) {
+  if (method === 'random') {
+    return buildUniformRandomPortfolio(cfg.max, cfg.pick || 6, count, rng);
+  }
+  return buildOptimizedPortfolio(model, cfg, method, count, historicalKeys, shapeProfile, rng, {
+    triesPerSet: OPTIMIZER_TRIES_WEIGHTED,
+    excludeHistorical: false
+  });
+}
+
+function buildUniformRandomPortfolio(max, pick, count, rng) {
+  const out = [];
+  const seen = {};
+  for (let i = 0; i < count; i++) {
+    let set = null;
+    for (let t = 0; t < 200; t++) {
+      const candidate = makeUniqueRandomSet(max, pick, rng);
+      const key = candidate.join('-');
+      if (seen[key]) continue;
+      set = candidate;
+      seen[key] = true;
+      break;
+    }
+    if (!set) set = makeUniqueRandomSet(max, pick, rng);
+    out.push(set);
+  }
+  return out;
+}
+
 function buildOptimizedPortfolio(model, cfg, method, count, historicalKeys, shapeProfile, rng, optimizerOptions) {
   const selected = [];
   const seen = {};
+  const exposure = {};
   const byNumber = {};
   model.forEach(function (it) { byNumber[it.n] = it; });
   historicalKeys = historicalKeys || {};
   optimizerOptions = optimizerOptions || {};
-  const triesPerSet = optimizerOptions.triesPerSet || (method === 'random' ? 250 : 650);
-  const maxOverlap = count <= 8 ? 1 : 2;
+  const pick = cfg.pick || 6;
+  const triesPerSet = optimizerOptions.triesPerSet || OPTIMIZER_TRIES_WEIGHTED;
+  const maxNumberUse = Math.max(1, Math.ceil(count * pick / cfg.max));
+  const maxOverlap = count * pick <= cfg.max ? 0 : (count <= 12 ? 1 : 2);
+  const excludeHistorical = optimizerOptions.excludeHistorical === true;
 
   for (let i = 0; i < count; i++) {
     let best = null;
     let bestScore = -Infinity;
 
     for (let t = 0; t < triesPerSet; t++) {
-      const candidate = makeCandidateSet(model, cfg.pick || 6, method, rng);
+      const candidate = makeCandidateSet(model, pick, method, rng);
       const key = candidate.join('-');
       if (seen[key]) continue;
-      if (historicalKeys[key]) continue;
+      if (excludeHistorical && historicalKeys[key]) continue;
+      if (!withinExposureLimit(candidate, exposure, maxNumberUse)) continue;
       if (hasExcessiveOverlap(candidate, selected, maxOverlap)) continue;
 
-      const score = scoreCandidate(candidate, byNumber, cfg, method, selected, shapeProfile, rng);
+      const score = scoreCandidate(candidate, byNumber, cfg, method, selected, shapeProfile, exposure, rng);
       if (score > bestScore) {
         best = candidate;
         bestScore = score;
@@ -1336,10 +1621,11 @@ function buildOptimizedPortfolio(model, cfg, method, count, historicalKeys, shap
     }
 
     if (!best) {
-      best = makeConstrainedRandomSet(cfg.max, cfg.pick || 6, seen, historicalKeys, selected, maxOverlap, rng);
+      best = makeConstrainedRandomSet(cfg.max, pick, seen, excludeHistorical ? historicalKeys : {}, selected, maxOverlap, rng, exposure, maxNumberUse);
     }
     selected.push(best);
     seen[best.join('-')] = true;
+    best.forEach(function (n) { exposure[n] = (exposure[n] || 0) + 1; });
   }
 
   return selected;
@@ -1374,7 +1660,11 @@ function weightedIndex(items, key, rng) {
   return items.length - 1;
 }
 
-function scoreCandidate(set, byNumber, cfg, method, selected, shapeProfile, rng) {
+function withinExposureLimit(set, exposure, maxNumberUse) {
+  return (set || []).every(function (n) { return (exposure[n] || 0) < maxNumberUse; });
+}
+
+function scoreCandidate(set, byNumber, cfg, method, selected, shapeProfile, exposure, rng) {
   const methodScore = average(set.map(function (n) {
     const it = byNumber[n];
     return it ? it[method + 'Weight'] || it.balancedWeight : 0.5;
@@ -1386,11 +1676,14 @@ function scoreCandidate(set, byNumber, cfg, method, selected, shapeProfile, rng)
     + penaltyTooClustered(set)
     + penaltyPopularPatterns(set, cfg.max);
   const overlapSoftPenalty = selected.reduce(function (sum, oldSet) {
-    return sum + countOverlap(set, oldSet) * 0.03;
+    return sum + countOverlap(set, oldSet) * 0.08;
   }, 0);
+  const newCoverage = set.filter(function (n) { return !(exposure[n] > 0); }).length / Math.max(1, set.length);
+  const exposurePenalty = average(set.map(function (n) { return exposure[n] || 0; })) * 0.08;
 
-  const randomNoise = randomValue(rng) * 0.04;
-  return methodScore * 1.4 + balanceScore - shapePenalty - overlapSoftPenalty + randomNoise;
+  const randomNoise = randomValue(rng) * 0.02;
+  return methodScore + balanceScore * 0.45 + newCoverage * 0.30
+    - shapePenalty * 0.35 - overlapSoftPenalty - exposurePenalty + randomNoise;
 }
 
 function buildShapeProfile(draws, cfg) {
@@ -1578,13 +1871,17 @@ function hasExcessiveOverlap(candidate, selected, maxOverlap) {
   return false;
 }
 
-function makeConstrainedRandomSet(max, pick, seen, historicalKeys, selected, maxOverlap, rng) {
+function makeConstrainedRandomSet(max, pick, seen, historicalKeys, selected, maxOverlap, rng, exposure, maxNumberUse) {
+  exposure = exposure || {};
+  maxNumberUse = Math.max(1, Number(maxNumberUse) || 1);
   for (let round = 0; round < 3; round++) {
     const allowedOverlap = maxOverlap + round;
+    const allowedUse = maxNumberUse + round;
     for (let t = 0; t < 1000; t++) {
       const candidate = makeUniqueRandomSet(max, pick, rng);
       const key = candidate.join('-');
       if (seen[key] || historicalKeys[key]) continue;
+      if (!withinExposureLimit(candidate, exposure, allowedUse)) continue;
       if (hasExcessiveOverlap(candidate, selected, allowedOverlap)) continue;
       return candidate;
     }
@@ -1888,21 +2185,48 @@ function getHistoricalResults(ticketType) {
   const sheet = getOrCreateSheet();
   const lastRow = sheet.getLastRow();
   const out = [];
-  if (lastRow < 2) return out;
+  const audit = { invalidRows: 0, duplicateRows: 0 };
+  if (lastRow < 2) {
+    out.audit = audit;
+    return out;
+  }
 
   const rows = sheet.getRange(2, 1, lastRow - 1, HEADERS.length).getValues();
+  const seenDates = {};
   rows.forEach(function (row, idx) {
     if (!(row[0] instanceof Date)) return;
-    if (normalizeType(row[1]) !== type) return;
+    const storedType = parseStoredTicketType(row[1]);
+    if (!storedType) {
+      if (String(row[1] || '').trim()) audit.invalidRows += 1;
+      return;
+    }
+    if (storedType !== type) return;
     const numbers = [];
     for (let c = 2; c <= 1 + (cfg.main || 6); c++) {
       const n = parseInt(row[c], 10);
-      if (!isNaN(n)) numbers.push(n);
+      numbers.push(n);
     }
+    const unique = {};
+    const validNumbers = numbers.length === (cfg.main || 6) && numbers.every(function (n) {
+      if (isNaN(n) || n < 1 || n > cfg.max || unique[n]) return false;
+      unique[n] = true;
+      return true;
+    });
     const sp = parseInt(row[8], 10);
+    const validSpecial = !cfg.hasSpecial || (!isNaN(sp) && sp >= 1 && sp <= cfg.max && !unique[sp]);
+    if (!validNumbers || !validSpecial) {
+      audit.invalidRows += 1;
+      return;
+    }
+    const iso = toIso(row[0]);
+    if (seenDates[iso]) {
+      audit.duplicateRows += 1;
+      return;
+    }
+    seenDates[iso] = true;
     out.push({
       rowIndex: idx + 2,
-      date: toIso(row[0]),
+      date: iso,
       type: type,
       numbers: numbers.sort(numberAsc),
       special: cfg.hasSpecial && !isNaN(sp) ? sp : null,
@@ -1911,7 +2235,16 @@ function getHistoricalResults(ticketType) {
   });
 
   out.sort(function (a, b) { return parseIso(a.date) - parseIso(b.date); });
+  out.audit = audit;
   return out;
+}
+
+function parseStoredTicketType(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return null;
+  if (text === '6/55' || text === '655' || text.indexOf('power') >= 0) return '6/55';
+  if (text === '6/45' || text === '645' || text.indexOf('mega') >= 0) return '6/45';
+  return null;
 }
 
 function readCompareRows(ticketType) {
@@ -1941,7 +2274,9 @@ function readCompareRows(ticketType) {
       bestMatch: row[6] === '' || row[6] === null ? null : Number(row[6]),
       details: Array.isArray(details) ? details : [],
       jackpot: jackpot || {},
-      prizes: Array.isArray(prizes) ? prizes : []
+      prizes: Array.isArray(prizes) ? prizes : [],
+      algorithm: String(row[10] || 'legacy'),
+      seed: String(row[11] || '')
     });
   });
 
@@ -2379,13 +2714,17 @@ function parseIso(value) {
   }
   const m = String(value).match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (!m) return null;
-  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const year = Number(m[1]), month = Number(m[2]) - 1, day = Number(m[3]);
+  const date = new Date(year, month, day);
+  return date.getFullYear() === year && date.getMonth() === month && date.getDate() === day ? date : null;
 }
 
 function parseVnDate(value) {
   const m = String(value || '').match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
   if (!m) return null;
-  return new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+  const year = Number(m[3]), month = Number(m[2]) - 1, day = Number(m[1]);
+  const date = new Date(year, month, day);
+  return date.getFullYear() === year && date.getMonth() === month && date.getDate() === day ? date : null;
 }
 
 function toIso(value) {

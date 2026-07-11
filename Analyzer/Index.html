@@ -3,7 +3,7 @@
 <head>
   <base target="_top">
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#1c1840">
   <title>Phân tích số Vietlott</title>
   <?!= include('Stylesheet'); ?>
@@ -50,22 +50,22 @@
           <button class="method-btn active" data-method="balanced">
             <span class="method-ico">⚖️</span>
             <b>Cân bằng</b>
-            <small>Kết hợp nóng &amp; nguội</small>
+            <small>Bayes thu gọn + tối ưu độ phủ</small>
           </button>
           <button class="method-btn" data-method="hot">
             <span class="method-ico">🔥</span>
             <b>Số nóng</b>
-            <small>Ưu tiên z-score cao</small>
+            <small>Tín hiệu nóng đã thu gọn</small>
           </button>
           <button class="method-btn" data-method="cold">
             <span class="method-ico">❄️</span>
             <b>Số nguội</b>
-            <small>Ưu tiên z-score thấp</small>
+            <small>Đối chứng tín hiệu nguội</small>
           </button>
           <button class="method-btn" data-method="random">
             <span class="method-ico">🎲</span>
-            <b>Ngẫu nhiên</b>
-            <small>Bốc thăm thuần</small>
+            <b>Ngẫu nhiên thuần</b>
+            <small>Đối chứng đồng đều, không tối ưu</small>
           </button>
         </div>
 
@@ -81,7 +81,7 @@
         <div class="gen-controls">
           <label class="count-field">
             <span>Số bộ</span>
-            <input type="number" id="set-count" min="1" max="50" value="4" inputmode="numeric">
+            <input type="number" id="set-count" min="1" max="100" value="100" inputmode="numeric">
           </label>
           <button class="btn btn-primary" id="btn-generate">
             ✨ Tạo bộ số gợi ý
@@ -140,7 +140,7 @@
           <div class="field special-field hidden" id="special-field">
             <span id="special-label">⭐ Số đặc biệt / Số phụ <em>*</em></span>
             <div class="num-inputs num-special">
-              <input type="number" name="n7" min="1" max="12" inputmode="numeric" placeholder="SP">
+              <input type="number" name="n7" min="1" max="55" inputmode="numeric" placeholder="ĐB">
             </div>
           </div>
 
@@ -242,7 +242,7 @@
 
           <div class="card" id="card-dry-streak">
             <div class="card-label">🏜️ Số đang khô bất thường</div>
-            <p class="stats-disclaimer">Số khô lâu không ra dễ hơn ở kỳ sau (gambler's fallacy) — đây chỉ là mô tả quá khứ.</p>
+            <p class="stats-disclaimer">Số khô lâu không dễ ra hơn ở kỳ sau (gambler's fallacy) — đây chỉ là mô tả quá khứ.</p>
             <div class="dry-list" id="dry-list"></div>
           </div>
 
@@ -257,7 +257,7 @@
 
         <!-- ====== HIỆU QUẢ GỢI Ý ====== -->
         <div class="compare-section">
-          <h3 class="compare-title">🎯 Hiệu quả gợi ý số</h3>
+          <h3 class="compare-title">📈 Hiệu quả gợi ý số</h3>
           <p class="compare-subtitle">So sánh bộ số đã copy với kết quả thực tế — chỉ mang tính thống kê giải trí.</p>
           <div class="baseline-card" id="compare-baseline"></div>
 
@@ -295,10 +295,11 @@
 
         <div class="card backtest-card" id="backtest-card">
           <div class="card-label">Hiệu quả gợi ý số</div>
+          <p class="backtest-note">So sánh walk-forward với đối chứng ngẫu nhiên thật. Hãy ưu tiên TB/vé, Best ≥2/≥3 và khoảng tin cậy; “có trùng ≥1” không phải là trúng giải.</p>
           <div class="backtest-controls">
             <label class="count-field">
               <span>Số kỳ test</span>
-              <input type="number" id="backtest-draw-count" min="1" max="60" value="30" inputmode="numeric">
+              <input type="number" id="backtest-draw-count" min="1" max="60" value="60" inputmode="numeric">
             </label>
             <label class="count-field">
               <span>Số vé mỗi kỳ</span>
@@ -323,7 +324,7 @@
         <!-- Summary cards -->
         <div class="fin-summary-cards" id="fin-summary-cards">
           <div class="fin-card fin-card-cost">
-            <div class="fin-card-icon">🎫</div>
+            <div class="fin-card-icon">💸</div>
             <div class="fin-card-val" id="fin-total-cost">—</div>
             <div class="fin-card-lbl">Tổng tiền mua vé</div>
           </div>
@@ -333,7 +334,7 @@
             <div class="fin-card-lbl">Tổng tiền thưởng</div>
           </div>
           <div class="fin-card fin-card-net" id="fin-card-net">
-            <div class="fin-card-icon">📊</div>
+            <div class="fin-card-icon">📈</div>
             <div class="fin-card-val" id="fin-net">—</div>
             <div class="fin-card-lbl">Lãi / Lỗ</div>
           </div>
@@ -379,7 +380,7 @@
       <!-- Jackpot input modal -->
       <div class="jackpot-modal hidden" id="jackpot-modal">
         <div class="jackpot-modal-box">
-          <div class="jackpot-modal-title">🎉 Nhập tiền thưởng Độc Đắc / Jackpot</div>
+          <div class="jackpot-modal-title">💰 Nhập tiền thưởng Độc Đắc / Jackpot</div>
           <div class="jackpot-modal-subtitle" id="jackpot-modal-subtitle"></div>
           <div id="jackpot-j1-field" class="jackpot-field">
             <label>Jackpot 1 (trùng 6 số chính)</label>
@@ -391,7 +392,7 @@
           </div>
           <div class="jackpot-modal-actions">
             <button class="btn btn-primary" id="jackpot-save-btn">Lưu</button>
-            <button class="btn" id="jackpot-cancel-btn">Huỷ</button>
+            <button class="btn" id="jackpot-cancel-btn">Hủy</button>
           </div>
         </div>
       </div>
