@@ -17,6 +17,8 @@ test('dashboard exposes the approved content hierarchy', () => {
 test('form and history remain separate accessible panels', () => {
   assert.match(html, /id="panel-form"[^>]+data-panel="form"/);
   assert.match(html, /id="panel-history"[^>]+data-panel="history"/);
+  assert.match(html, /class="[^"]*panel[^"]*hidden[^"]*" id="panel-form"/);
+  assert.match(html, /class="[^"]*panel[^"]*hidden[^"]*" id="panel-history"/);
   assert.match(html, /id="form-msg"[^>]+aria-live="polite"/);
   assert.match(html, /id="history-list"/);
 });
