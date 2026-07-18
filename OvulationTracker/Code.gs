@@ -51,7 +51,7 @@ const IRREGULAR_THRESHOLD = 14;
  *   Who has access: Anyone (hoặc tùy)
  */
 function doGet() {
-  return HtmlService.createTemplateFromFile('index')
+  return HtmlService.createTemplateFromFile('Index')
     .evaluate()
     .setTitle('Theo dõi chu kỳ — Rụng trứng & Thụ thai')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1, maximum-scale=1')
@@ -665,7 +665,7 @@ function forecastNext() {
  * Mở giao diện web ngay trong Google Sheet như một dialog.
  */
 function openWebDialog() {
-  const html = HtmlService.createTemplateFromFile('index')
+  const html = HtmlService.createTemplateFromFile('Index')
     .evaluate()
     .setWidth(900)
     .setHeight(700);
